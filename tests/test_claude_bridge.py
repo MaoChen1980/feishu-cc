@@ -147,6 +147,24 @@ class TestResponseAccumulationExtra:
         }))
         assert bridge._response_text == "final text"
 
+    def test_tool_use_block_accumulates(self) -> None:
+        """Tool use blocks should show tool name and input in response_text."""
+        bridge = _make_bridge()
+        bridge._response_text = ""
+
+        asyncio.run(bridge._handle_event({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "pytest"}},
+                    {"type": "text", "text": "done"},
+                ],
+            },
+        }))
+        assert "Bash" in bridge._response_text
+        assert "pytest" in bridge._response_text
+        assert "done" in bridge._response_text
+
     def test_send_lock_is_lock(self) -> None:
         """send_message uses asyncio.Lock for serialization."""
         bridge = _make_bridge()

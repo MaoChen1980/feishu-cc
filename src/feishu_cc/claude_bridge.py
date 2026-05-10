@@ -271,6 +271,19 @@ class ClaudeBridge:
                     thinking = block.get("thinking", "")
                     if self._on_thinking:
                         self._on_thinking(thinking)
+                else:
+                    name = block.get("name", "")
+                    inp = block.get("input", "")
+                    if isinstance(inp, dict):
+                        inp = inp.get("command", inp.get("path", ""))
+                    if name:
+                        self._response_text += f"[使用工具 {name}"
+                        if inp:
+                            self._response_text += f": {inp}]"
+                        else:
+                            self._response_text += "]\n"
+                    else:
+                        self._response_text += str(block) + "\n"
 
         elif event_type == "user":
             logger.debug("[{}] User event: {}", self._bot_name, event.get("message", {}).get("content", ""))
@@ -285,6 +298,9 @@ class ClaudeBridge:
             value = event.get("value", {})
             if self._on_permission_request:
                 self._on_permission_request(request_id, prompt, value)
+
+        else:
+            logger.info("[{}] Unhandled event type: {} - {}", self._bot_name, event_type, event)
 
     # -- internal: stdin writer ----------------------------------------------
 
