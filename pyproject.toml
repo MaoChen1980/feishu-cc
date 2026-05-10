@@ -14,6 +14,13 @@ feishu-cc = "feishu_cc.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning:lark_oapi*",
+    "ignore:coroutine '.*' was never awaited:RuntimeWarning",
+]
+
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"

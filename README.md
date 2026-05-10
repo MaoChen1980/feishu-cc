@@ -106,6 +106,13 @@ feishu-cc --log-level DEBUG
 
 每个 Bot 拥有独立的 Claude Code 子进程、workspace、session 和 system prompt。
 
+## 测试
+
+```bash
+pip install pytest
+pytest
+```
+
 ## 许可
 
 MIT
