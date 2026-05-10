@@ -172,7 +172,7 @@ def test_send_reply_auto_mode_rich_content() -> None:
     # Mock send methods that require a live client — this test only checks routing
     client._send_card = lambda c, cid: bool(cid)  # type: ignore[method-assign]
     client._send_post_reply = lambda cid, _: bool(cid)  # type: ignore[method-assign]
-    client._send_plain_text = lambda cid, _: None  # type: ignore[method-assign]
+    client.send_plain_text = lambda cid, _: None  # type: ignore[method-assign]
     client.send_reply("chat_1", "root_1", "normal text")
     client.send_reply("chat_1", "root_1", "| h1 | h2 |\n| --- | --- |\n| a | b |")
 

@@ -38,8 +38,22 @@ class _BotRuntime:
         self._thread = threading.Thread(target=self.loop.run_forever, daemon=True)
         self._thread.start()
 
+    async def _shutdown_async(self):
+        """Stop bridge (terminates Claude subprocess) on the event loop."""
+        await self.bridge.stop()
+        # Clean up stale session so next start is fresh
+        if self.bridge._session_file.exists():
+            self.bridge._session_file.unlink()
+
     def stop_loop(self) -> None:
+        """Stop bridge, then stop the event loop."""
         if self.loop:
+            # Run bridge shutdown on the event loop before stopping it
+            fut = asyncio.run_coroutine_threadsafe(self._shutdown_async(), self.loop)
+            try:
+                fut.result(timeout=10)
+            except Exception:
+                pass
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self._thread:
             self._thread.join(timeout=3)
@@ -115,8 +129,14 @@ class FeishuCCApp:
 
         logger.info("All bots started — waiting for messages...")
 
-        while True:
-            time.sleep(10)
+        try:
+            while True:
+                time.sleep(10)
+        except KeyboardInterrupt:
+            logger.info("Shutting down...")
+            for rt in reversed(self._bots):
+                rt.stop_loop()
+            logger.info("Goodbye.")
 
     # -- helpers -------------------------------------------------------------
 
@@ -154,6 +174,7 @@ class FeishuCCApp:
                 if self._config.done_emoji:
                     feishu._add_reaction(message_id, self._config.done_emoji)
                 feishu._remove_reaction(message_id)
+            feishu.send_plain_text(chat_id, "✅ 空闲")
 
         rt.schedule(_handle())
 

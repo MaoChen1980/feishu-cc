@@ -362,41 +362,32 @@ class FeishuClient:
         processed = self._wrap_tables_in_code_fences(cleaned)
         if self._send_post_reply(chat_id, processed):
             return
-        self._send_plain_text(chat_id, processed)
+        self.send_plain_text(chat_id, processed)
 
     def send_permission_card(self, chat_id: str, prompt: str, request_id: str,
                              value: Optional[dict] = None) -> None:
         """Send a permission request card with allow/deny buttons."""
-        action = "操作"
-        detail = ""
+        # Show the full permission details
         if value:
-            if "command" in value:
-                action = "执行命令"
-                detail = value["command"]
-            elif "path" in value:
-                action = "操作文件"
-                detail = value["path"]
-            elif "pattern" in value:
-                action = "搜索文件"
-                detail = value["pattern"]
-            elif "expression" in value:
-                action = "计算表达式"
-                detail = value["expression"]
-        if not detail:
-            detail = prompt
+            lines = [f"**需求**: {prompt}"]
+            for k, v in value.items():
+                lines.append(f"**{k}**: `{v}`")
+            content = "\n".join(lines)
+        else:
+            content = prompt
         elements = [
-            {"tag": "markdown", "content": f"**Claude 请求：{action}**\n`{detail}`"},
+            {"tag": "markdown", "content": content},
             {
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": "允许"},
                 "type": "primary",
-                "behaviors": [{"type": "callback", "value": {"qr": f"__perm_allow__:{request_id}", "cid": chat_id}}],
+                "value": {"qr": f"__perm_allow__:{request_id}", "cid": chat_id},
             },
             {
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": "拒绝"},
                 "type": "danger",
-                "behaviors": [{"type": "callback", "value": {"qr": f"__perm_deny__:{request_id}", "cid": chat_id}}],
+                "value": {"qr": f"__perm_deny__:{request_id}", "cid": chat_id},
             },
         ]
         card = {"schema": "2.0", "config": {"width_mode": "fill"}, "body": {"elements": elements}}
@@ -418,7 +409,7 @@ class FeishuClient:
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": qr["label"]},
                     "type": "default",
-                    "behaviors": [{"type": "callback", "value": {"qr": qr["reply"], "cid": chat_id}}],
+                    "value": {"qr": qr["reply"], "cid": chat_id},
                 })
         card: dict[str, Any] = {
             "schema": "2.0",
@@ -479,7 +470,7 @@ class FeishuClient:
         logger.warning("Post send failed ({}): {}", resp.code, resp.msg)
         return False
 
-    def _send_plain_text(self, chat_id: str, content: str) -> None:
+    def send_plain_text(self, chat_id: str, content: str) -> None:
         from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
         request = (

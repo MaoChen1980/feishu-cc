@@ -147,8 +147,8 @@ class TestResponseAccumulationExtra:
         }))
         assert bridge._response_text == "final text"
 
-    def test_tool_use_block_accumulates(self) -> None:
-        """Tool use blocks should show tool name and input in response_text."""
+    def test_tool_use_block_not_in_response(self) -> None:
+        """Tool use blocks should not appear in response_text."""
         bridge = _make_bridge()
         bridge._response_text = ""
 
@@ -161,9 +161,29 @@ class TestResponseAccumulationExtra:
                 ],
             },
         }))
-        assert "Bash" in bridge._response_text
-        assert "pytest" in bridge._response_text
-        assert "done" in bridge._response_text
+        assert bridge._response_text == "done"
+
+    def test_task_summary_at_result(self) -> None:
+        """Result event should prepend task summaries to response_text."""
+        bridge = _make_bridge()
+        bridge._response_text = "final answer"
+        bridge._task_summaries = ["已运行测试", "已编辑文件"]
+
+        asyncio.run(bridge._handle_event({"type": "result"}))
+        assert "已运行测试" in bridge._response_text
+        assert "已编辑文件" in bridge._response_text
+        assert "final answer" in bridge._response_text
+        assert bridge._response_text.index("已运行测试") < bridge._response_text.index("final answer")
+        assert bridge._task_summaries == []
+
+    def test_no_tool_uses_no_summary(self) -> None:
+        """Result without task summaries should leave response_text untouched."""
+        bridge = _make_bridge()
+        bridge._response_text = "just text"
+        bridge._task_summaries = []
+
+        asyncio.run(bridge._handle_event({"type": "result"}))
+        assert bridge._response_text == "just text"
 
     def test_send_lock_is_lock(self) -> None:
         """send_message uses asyncio.Lock for serialization."""

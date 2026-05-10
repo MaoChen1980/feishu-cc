@@ -88,8 +88,14 @@ class ClaudeBridge:
         self._send_lock = asyncio.Lock()
         self._session_file = CONFIG_DIR / "sessions" / f"{bot_name}.session"
 
+        # Task summaries from Claude — semantic descriptions of what it did
+        self._task_summaries: list[str] = []
+
         # Stderr diagnostics buffer (fed by drain thread, always in memory)
         self._stderr_buf: list[str] = []
+
+        # Init failure flag: process died before _ready was set
+        self._init_failed = False
 
         # Reader threads
         self._stdout_thread: threading.Thread | None = None
@@ -156,7 +162,24 @@ class ClaudeBridge:
 
             # Pipe closed → process exited
             self._alive = False
-            logger.info("[{}] Stdout pipe closed", self._bot_name)
+            if not self._ready.is_set():
+                stderr = self._tail_stderr()
+                logger.error(
+                    "[{}] Claude process died during initialization. Stderr:\n{}",
+                    self._bot_name, stderr
+                )
+                asyncio.run_coroutine_threadsafe(
+                    self._handle_init_failure(), self._loop
+                )
+            else:
+                stderr = self._tail_stderr()
+                logger.error(
+                    "[{}] Claude process crashed. Auto-restarting. Stderr:\n{}",
+                    self._bot_name, stderr
+                )
+                asyncio.run_coroutine_threadsafe(
+                    self._handle_crash(), self._loop
+                )
 
         self._stdout_thread = threading.Thread(target=_drain, daemon=True)
         self._stdout_thread.start()
@@ -173,6 +196,27 @@ class ClaudeBridge:
 
         self._stderr_thread = threading.Thread(target=_drain, daemon=True)
         self._stderr_thread.start()
+
+    async def _handle_init_failure(self) -> None:
+        """Process died before sending session event — remove stale session and unblock."""
+        if self._session_file.exists():
+            logger.warning("[{}] Removing stale session file: {}", self._bot_name, self._session_file)
+            self._session_file.unlink()
+        self._init_failed = True
+        self._ready.set()
+
+    async def _handle_crash(self) -> None:
+        """Process died during normal operation — unblock waiters and auto-restart."""
+        # Unblock any send_message that was waiting for a response
+        self._response_done.set()
+        # Restart fresh (no resume)
+        if self._session_file.exists():
+            self._session_file.unlink()
+        self._session_id = None
+        logger.info("[{}] Auto-restarting Claude process...", self._bot_name)
+        await self.start()
+        await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
+        logger.info("[{}] Claude process auto-restarted", self._bot_name)
 
     async def stop(self) -> None:
         """Terminate the Claude subprocess (three-phase shutdown)."""
@@ -196,10 +240,25 @@ class ClaudeBridge:
         async with self._send_lock:
             if not self._ready.is_set():
                 logger.info("[{}] Waiting for Claude to finish initializing...", self._bot_name)
+                try:
+                    await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
+                except asyncio.TimeoutError:
+                    logger.warning("[{}] Init timed out, attempting recovery...", self._bot_name)
+                    self._init_failed = True
+
+            # Recover from init failure (stale session, crashed process, etc.)
+            if self._init_failed or not self._alive:
+                logger.info("[{}] Recovering Claude process...", self._bot_name)
+                if self._session_file.exists():
+                    self._session_file.unlink()
+                self._session_id = None
+                self._init_failed = False
+                await self.start()
                 await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
 
             self._response_text = ""
             self._response_done.clear()
+            self._task_summaries.clear()
 
             msg = {"type": "user", "message": {"role": "user", "content": text}}
             await self._write_json(msg)
@@ -256,6 +315,14 @@ class ClaudeBridge:
                 logger.info("[{}] Session established: {}", self._bot_name, sid)
             if sid:
                 self._ready.set()
+
+            subtype = event.get("subtype", "")
+            if subtype == "task_notification" and event.get("status") == "completed":
+                summary = event.get("summary", "")
+                if summary:
+                    self._task_summaries.append(summary)
+                return
+
             logger.debug("[{}] System event: {}", self._bot_name, event)
 
         elif event_type == "assistant":
@@ -271,24 +338,23 @@ class ClaudeBridge:
                     thinking = block.get("thinking", "")
                     if self._on_thinking:
                         self._on_thinking(thinking)
-                else:
+                elif block_type == "tool_use":
                     name = block.get("name", "")
-                    inp = block.get("input", "")
+                    inp = block.get("input", {})
                     if isinstance(inp, dict):
-                        inp = inp.get("command", inp.get("path", ""))
-                    if name:
-                        self._response_text += f"[使用工具 {name}"
-                        if inp:
-                            self._response_text += f": {inp}]"
-                        else:
-                            self._response_text += "]\n"
+                        brief_inp = inp.get("command") or inp.get("path") or inp.get("file_path") or ""
                     else:
-                        self._response_text += str(block) + "\n"
+                        brief_inp = ""
+                    logger.debug("[{}] Tool use: {}{}", self._bot_name, name, f" {brief_inp}" if brief_inp else "")
 
         elif event_type == "user":
             logger.debug("[{}] User event: {}", self._bot_name, event.get("message", {}).get("content", ""))
 
         elif event_type == "result":
+            if self._task_summaries:
+                summary_str = ", ".join(dict.fromkeys(self._task_summaries))
+                self._response_text = f"> {summary_str}\n\n" + self._response_text
+                self._task_summaries.clear()
             logger.debug("[{}] Result event: {}", self._bot_name, event)
             self._response_done.set()
 
