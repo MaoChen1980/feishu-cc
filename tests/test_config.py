@@ -55,6 +55,7 @@ class TestConfig:
         assert "bots" in data
         assert len(data["bots"]) == 1
         assert data["bots"][0]["name"] == "my-bot"
+        assert "---quick-replies" in data["bots"][0]["system_prompt"]
         assert data["bots"][0]["appId"] == "cli_xxxxxxxxxxxxxxxxxxxx"
         assert data["domain"] == "feishu"
 

@@ -69,6 +69,11 @@ class Config:
     def _create_template(cls, path: Path) -> None:
         """Create a template config file at the given path."""
         path.parent.mkdir(parents=True, exist_ok=True)
+        default_prompt = (
+            "你通过飞书与用户对话。回复可以使用 `---quick-replies` 提供一键按钮。\n"
+            "不要截断你的回复，用户需要看到完整内容。\n"
+            "表格使用 markdown 格式即可。"
+        )
         template: dict[str, Any] = {
             "bots": [
                 {
@@ -76,7 +81,7 @@ class Config:
                     "appId": "cli_xxxxxxxxxxxxxxxxxxxx",
                     "appSecret": "your_app_secret",
                     "workspace": None,
-                    "system_prompt": None,
+                    "system_prompt": default_prompt,
                 }
             ],
             "domain": "feishu",
