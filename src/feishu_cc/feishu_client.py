@@ -114,7 +114,7 @@ class FeishuClient:
             return
 
         content = getattr(message, "content", "")
-        logger.info("Raw message content: {}", content)
+        logger.debug("Raw message content: {}", content)
         content_obj = json.loads(content)
         text = content_obj.get("text", "") if isinstance(content_obj, dict) else str(content_obj)
 
@@ -141,7 +141,7 @@ class FeishuClient:
 
     def _on_card_action_wrapper(self, data: Any) -> None:
         """Handle card button click."""
-        logger.info("Card action raw data: {}", data)
+        logger.debug("Card action raw data: {}", data)
         event = data.event
         operator = event.operator
         action = event.action
@@ -279,24 +279,6 @@ class FeishuClient:
                 result.extend(table_lines)
         return "\n".join(result)
 
-    @staticmethod
-    def _strip_tables(text: str) -> str:
-        """Remove markdown tables from text, preserving everything else."""
-        lines = text.split("\n")
-        result: list[str] = []
-        in_table = False
-        for line in lines:
-            stripped = line.strip()
-            is_table = stripped.startswith("|") and stripped.endswith("|")
-            if is_table:
-                if not in_table:
-                    in_table = True
-            else:
-                if in_table:
-                    in_table = False
-                result.append(line)
-        return "\n".join(result).strip()
-
     # -- send reply ----------------------------------------------------------
 
     def send_reply(self, chat_id: str, root_id: Optional[str], content: str) -> None:
@@ -307,13 +289,7 @@ class FeishuClient:
         )
 
         if use_card:
-            # Cards don't support tables → strip them and send separately
-            card_content = self._strip_tables(cleaned) if has_table else cleaned
-            if self._send_card_reply(chat_id, card_content, quick_replies=qrs):
-                if has_table:
-                    # Also send table as a follow-up post
-                    tabled = self._wrap_tables_in_code_fences(cleaned)
-                    self._send_post_reply(chat_id, tabled)
+            if self._send_card_reply(chat_id, cleaned, quick_replies=qrs):
                 return
 
         processed = self._wrap_tables_in_code_fences(cleaned)
@@ -347,8 +323,6 @@ class FeishuClient:
         self, chat_id: str, content: str,
         quick_replies: list[dict[str, str]] | None = None,
     ) -> bool:
-        # Cards don't support native markdown tables → wrap in code fences
-        content = self._wrap_tables_in_code_fences(content)
         header_text, body = self._extract_header(content)
         elements: list[dict[str, Any]] = [
             {"tag": "markdown", "content": body or content},
@@ -377,7 +351,7 @@ class FeishuClient:
         from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
         payload = json.dumps(card)
-        logger.info("Sending card to {}: {}", chat_id, payload)
+        logger.debug("Sending card to {}: {}", chat_id, payload)
         request = (
             CreateMessageRequest.builder()
             .receive_id_type("chat_id")
@@ -401,7 +375,7 @@ class FeishuClient:
 
         payload = {"zh_cn": {"content": [[{"tag": "md", "text": content}]]}}
         payload_str = json.dumps(payload)
-        logger.info("Sending post to {}: {}", chat_id, payload_str)
+        logger.debug("Sending post to {}: {}", chat_id, payload_str)
         request = (
             CreateMessageRequest.builder()
             .receive_id_type("chat_id")
@@ -435,7 +409,7 @@ class FeishuClient:
             )
             .build()
         )
-        logger.info("Sending plain text to {}: {}", chat_id, content)
+        logger.debug("Sending plain text to {}: {}", chat_id, content)
         self._client.im.v1.message.create(request)
 
     # -- reactions -----------------------------------------------------------
