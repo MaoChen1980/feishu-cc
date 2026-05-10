@@ -20,6 +20,13 @@ from loguru import logger
 
 from feishu_cc.config import CONFIG_DIR
 
+# Prevent orphan processes on Windows: create a new process group so that
+# Ctrl+C / console close doesn't propagate to the Claude subprocess, and
+# so we can cleanly kill the process group on shutdown.
+_CREATION_FLAGS = 0
+if os.name == "nt":
+    _CREATION_FLAGS = subprocess.CREATE_NEW_PROCESS_GROUP
+
 DEFAULT_SYSTEM_PROMPT = """\
 你通过飞书与用户对话。回复可以使用 `---quick-replies` 提供一键按钮。
 
@@ -223,19 +230,25 @@ class ClaudeBridge:
         logger.info("[{}] Claude process auto-restarted", self._bot_name)
 
     async def stop(self) -> None:
-        """Terminate the Claude subprocess (three-phase shutdown)."""
+        """Terminate the Claude subprocess."""
         self._alive = False
         proc = self._proc
         if proc is None or proc.returncode is not None:
             return
 
-        proc.stdin.close()
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
 
-        for sig in ("terminate", "kill"):
+        try:
+            proc.terminate()
             proc.wait(timeout=5)
-            return
-
-        proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+        except OSError:
+            pass  # Already dead / access denied
 
     # -- send ----------------------------------------------------------------
 

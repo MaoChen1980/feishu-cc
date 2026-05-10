@@ -356,7 +356,7 @@ class FeishuClient:
 
     def send_text(self, chat_id: str, text: str) -> None:
         """Send a plain text message — no card/post processing, for notifications."""
-        self._send_plain_text(chat_id, text)
+        self.send_plain_text(chat_id, text)
 
     def send_reply(self, chat_id: str, root_id: Optional[str], content: str) -> None:
         cleaned, qrs = self._parse_quick_replies(content)

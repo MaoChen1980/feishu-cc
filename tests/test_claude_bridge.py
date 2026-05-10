@@ -220,6 +220,178 @@ class TestSessionManagementExtra:
         assert bridge._session_id == "existing"
 
 
+class TestToolUseCallback:
+    def test_tool_use_callback_fires(self) -> None:
+        """on_tool_use callback receives tool name and brief input."""
+        captured: list[tuple[str, str]] = []
+        bridge = _make_bridge(on_tool_use=lambda n, b: captured.append((n, b)))
+
+        asyncio.run(bridge._handle_event({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "pytest tests/"}},
+                ],
+            },
+        }))
+        assert captured == [("Bash", "pytest tests/")]
+
+    def test_tool_use_callback_with_path_input(self) -> None:
+        """Tool input with path extracts path as brief."""
+        captured: list[tuple[str, str]] = []
+        bridge = _make_bridge(on_tool_use=lambda n, b: captured.append((n, b)))
+
+        asyncio.run(bridge._handle_event({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "Edit", "input": {"file_path": "src/main.py"}},
+                ],
+            },
+        }))
+        assert captured == [("Edit", "src/main.py")]
+
+    def test_tool_use_callback_without_input(self) -> None:
+        """Tool use without recognizable input sends brief as empty."""
+        captured: list[tuple[str, str]] = []
+        bridge = _make_bridge(on_tool_use=lambda n, b: captured.append((n, b)))
+
+        asyncio.run(bridge._handle_event({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "Read", "input": {}},
+                ],
+            },
+        }))
+        assert captured == [("Read", "")]
+
+    def test_tool_use_callback_empty_name_skipped(self) -> None:
+        """on_tool_use not called when tool name is empty."""
+        called = False
+
+        def callback(name: str, brief: str) -> None:
+            nonlocal called
+            called = True
+
+        bridge = _make_bridge(on_tool_use=callback)
+        asyncio.run(bridge._handle_event({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "", "input": {"command": "ls"}},
+                ],
+            },
+        }))
+        assert not called
+
+    def test_tool_use_callback_multiple_tools(self) -> None:
+        """Multiple tool_use blocks fire callback each time."""
+        captured: list[tuple[str, str]] = []
+        bridge = _make_bridge(on_tool_use=lambda n, b: captured.append((n, b)))
+
+        asyncio.run(bridge._handle_event({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "a.py"}},
+                    {"type": "tool_use", "name": "Edit", "input": {"file_path": "b.py"}},
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "pytest"}},
+                ],
+            },
+        }))
+        assert len(captured) == 3
+        assert captured[0] == ("Read", "a.py")
+        assert captured[1] == ("Edit", "b.py")
+        assert captured[2] == ("Bash", "pytest")
+
+    def test_on_tool_use_error_does_not_crash(self) -> None:
+        """Exception in on_tool_use callback does not crash _handle_event."""
+        def failing(_, __):
+            raise RuntimeError("callback failed")
+
+        bridge = _make_bridge(on_tool_use=failing)
+        # Should not raise
+        asyncio.run(bridge._handle_event({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+                ],
+            },
+        }))
+
+
+class TestTaskSummaryCallback:
+    def test_task_notification_collects_summary(self) -> None:
+        """task_notification events append summary to _task_summaries."""
+        bridge = _make_bridge()
+
+        asyncio.run(bridge._handle_event({
+            "type": "system",
+            "subtype": "task_notification",
+            "status": "completed",
+            "summary": "已运行测试",
+            "session_id": "sess_1",
+        }))
+        assert bridge._task_summaries == ["已运行测试"]
+
+    def test_task_notification_multiple_summaries(self) -> None:
+        """Multiple task_notification events accumulate summaries."""
+        bridge = _make_bridge()
+        asyncio.run(bridge._handle_event({
+            "type": "system", "subtype": "task_notification",
+            "status": "completed", "summary": "已读取文件", "session_id": "s",
+        }))
+        asyncio.run(bridge._handle_event({
+            "type": "system", "subtype": "task_notification",
+            "status": "completed", "summary": "已编辑文件", "session_id": "s",
+        }))
+        assert bridge._task_summaries == ["已读取文件", "已编辑文件"]
+
+    def test_task_notification_no_summary_skipped(self) -> None:
+        """task_notification without summary does not append."""
+        bridge = _make_bridge()
+        bridge._task_summaries = ["existing"]
+
+        asyncio.run(bridge._handle_event({
+            "type": "system",
+            "subtype": "task_notification",
+            "status": "completed",
+            "summary": "",
+            "session_id": "sess_1",
+        }))
+        assert bridge._task_summaries == ["existing"]
+
+    def test_task_summary_callback_fires(self) -> None:
+        """on_task_summary callback receives summary text."""
+        captured: list[str] = []
+        bridge = _make_bridge(on_task_summary=captured.append)
+
+        asyncio.run(bridge._handle_event({
+            "type": "system",
+            "subtype": "task_notification",
+            "status": "completed",
+            "summary": "已运行测试",
+            "session_id": "sess_1",
+        }))
+        assert captured == ["已运行测试"]
+
+    def test_on_task_summary_error_does_not_crash(self) -> None:
+        """Exception in on_task_summary does not crash _handle_event."""
+        def failing(_):
+            raise RuntimeError("callback failed")
+
+        bridge = _make_bridge(on_task_summary=failing)
+        asyncio.run(bridge._handle_event({
+            "type": "system",
+            "subtype": "task_notification",
+            "status": "completed",
+            "summary": "测试",
+            "session_id": "sess_1",
+        }))
+
+
 class TestSendMessageFormat:
     def test_user_message_format(self) -> None:
         msg = {"type": "user", "message": {"role": "user", "content": "hello"}}
