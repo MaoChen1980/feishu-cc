@@ -374,15 +374,52 @@ class FeishuClient:
             return
         self.send_plain_text(chat_id, processed)
 
+    @staticmethod
+    def _format_permission_value(value: dict, indent: int = 0) -> str:
+        """递归格式化权限 value dict 为可读文本，处理嵌套结构。"""
+        lines: list[str] = []
+        prefix = "  " * indent
+        for k, v in value.items():
+            if isinstance(v, dict):
+                # 如果已有 tool_name + tool_args，跳过冗余的 tool_use
+                if k == "tool_use" and "tool_name" in value:
+                    continue
+                nested = FeishuClient._format_permission_value(v, indent + 1)
+                lines.append(f"{prefix}**{k}**:")
+                lines.append(nested)
+            elif isinstance(v, list):
+                items = "\n".join(
+                    f"{prefix}  - `{i}`" for i in v if isinstance(i, str)
+                )
+                lines.append(f"{prefix}**{k}**:\n{items}" if items else f"{prefix}**{k}**: `{v}`")
+            else:
+                lines.append(f"{prefix}**{k}**: `{v}`")
+        return "\n".join(lines)
+
     def send_permission_card(self, chat_id: str, prompt: str, request_id: str,
                              value: Optional[dict] = None) -> None:
         """Send a permission request card with allow/deny buttons."""
-        # Show the full permission details
         if value:
-            lines = [f"**需求**: {prompt}"]
-            for k, v in value.items():
-                lines.append(f"**{k}**: `{v}`")
-            content = "\n".join(lines)
+            # 优先使用 detailed permission_prompt（最可读）
+            permission_prompt = value.get("permission_prompt", "")
+            tool_name = value.get("tool_name", "")
+            tool_args = value.get("tool_args", {})
+            if permission_prompt:
+                if tool_name:
+                    content = f"**{tool_name} 请求权限**\n\n{permission_prompt}"
+                else:
+                    content = f"**请求权限**\n\n{permission_prompt}"
+            elif tool_name and tool_args:
+                args_str = "\n".join(
+                    f"  **{k}**: `{v}`"
+                    for k, v in tool_args.items()
+                    if not isinstance(v, (dict, list))
+                )
+                content = f"**{tool_name} 请求权限**\n{args_str}"
+            else:
+                # 兜底：递归显示所有字段
+                details = FeishuClient._format_permission_value(value)
+                content = f"**{prompt}**\n{details}"
         else:
             content = prompt
         elements = [
