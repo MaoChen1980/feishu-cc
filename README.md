@@ -15,6 +15,7 @@
 - **飞书原生交互** — 卡片消息、Quick Replies 按钮、Reaction 表情
 - **工具权限** — Claude 请求权限时通过飞书卡片让用户选择允许/拒绝
 - **会话恢复** — session 持久化，重启后自动 `--resume`
+- **工作目录切换** — 对话中发送 `/workspace <path>` 即可切换 Claude 工作目录
 - **自定义 System Prompt** — 每个 Bot 可配置不同的 system prompt
 
 ## 安装
