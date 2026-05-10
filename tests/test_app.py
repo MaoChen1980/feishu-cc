@@ -61,3 +61,48 @@ class TestBotRuntime:
 
         with pytest.raises(Exception):
             rt.run_async(dummy())
+
+    def test_schedule_does_not_block(self) -> None:
+        """schedule is fire-and-forget, returns immediately."""
+        rt = _make_runtime()
+        rt.start_loop()
+
+        async def dummy():
+            return "ok"
+
+        # schedule() should not await the coroutine, just schedule it
+        rt.schedule(dummy())
+
+
+class TestOnMessage:
+    def test_empty_message_id_skips_reactions(self) -> None:
+        """_on_message with empty message_id schedules _handle without crashing."""
+        import asyncio
+        from feishu_cc.app import FeishuCCApp
+        from feishu_cc.config import Config, BotConfig
+        from feishu_cc.claude_bridge import ClaudeBridge
+
+        app = FeishuCCApp.__new__(FeishuCCApp)
+        app._config = Config(
+            bots=[BotConfig(name="test", app_id="t", app_secret="s")],
+            domain="feishu",
+            claude_path="claude",
+            render_mode="post",
+            react_emoji="",
+            done_emoji="",
+        )
+
+        class MockFeishu:
+            def send_reply(self, *a, **kw):
+                pass
+            def _add_reaction(self, *a, **kw):
+                raise RuntimeError("should not be called")
+            def _remove_reaction(self, *a, **kw):
+                raise RuntimeError("should not be called")
+
+        bridge = ClaudeBridge(bot_name="test", claude_path="claude")
+        bridge._ready.set()
+        mock = MockFeishu()
+
+        app._bots = []
+        app._on_message("test", bridge, mock, "chat_1", "hello", "")

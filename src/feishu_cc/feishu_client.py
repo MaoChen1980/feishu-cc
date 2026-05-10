@@ -8,9 +8,12 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from loguru import logger
+
+from feishu_cc.config import CONFIG_DIR
 
 
 class FeishuClient:
@@ -50,6 +53,8 @@ class FeishuClient:
 
     def start(self) -> None:
         """Set up Feishu WebSocket client and enter the event loop."""
+        self._cleanup_temp()
+
         import lark_oapi as lark
 
         self._client = (
@@ -114,9 +119,22 @@ class FeishuClient:
             return
 
         content = getattr(message, "content", "")
-        logger.debug("Raw message content: {}", content)
+        logger.info("Raw message content: {}", content)
         content_obj = json.loads(content)
-        text = content_obj.get("text", "") if isinstance(content_obj, dict) else str(content_obj)
+        if isinstance(content_obj, dict):
+            image_key = content_obj.get("image_key", "")
+            if image_key:
+                logger.info("Detected image with key: {}", image_key)
+                local_path = self._download_image(message_id, image_key)
+                if local_path:
+                    text = f"用户发送了一张图片，文件路径：{local_path}"
+                else:
+                    logger.warning("Image download returned empty, check previous warning for details")
+                    text = "用户发送了一张图片，但下载失败"
+            else:
+                text = content_obj.get("text", "")
+        else:
+            text = str(content_obj)
 
         sender_id_obj = getattr(sender, "sender_id", None)
         if sender_id_obj is not None and hasattr(sender_id_obj, "open_id"):
@@ -167,6 +185,55 @@ class FeishuClient:
 
         if self._on_card_action:
             self._on_card_action(reply_text, chat_id, sender_id)
+
+    # -- image handling -------------------------------------------------------
+
+    @staticmethod
+    def _cleanup_temp() -> None:
+        """Remove temp files older than 24 hours."""
+        temp_dir = CONFIG_DIR / "temp"
+        if not temp_dir.exists():
+            return
+        cutoff = time.time() - 86400
+        for f in temp_dir.iterdir():
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+                logger.debug("Cleaned up temp file: {}", f)
+
+    def _download_image(self, message_id: str, image_key: str) -> str:
+        """Download image from a Feishu message resource, save to temp dir."""
+        from lark_oapi.api.im.v1 import GetMessageResourceRequest
+
+        request = GetMessageResourceRequest.builder() \
+            .message_id(message_id) \
+            .file_key(image_key) \
+            .type("image") \
+            .build()
+        response = self._client.im.v1.message_resource.get(request)
+        if response.code != 0 or not response.file:
+            status = response.raw.status_code if response.raw else "N/A"
+            logger.warning("Failed to download image {}: code={}, msg={}, http_status={}",
+                           image_key, response.code, response.msg, status)
+            return ""
+
+        data = response.file.read()
+
+        # Detect image format from magic bytes
+        ext = "jpg"
+        if data[:4] == b"\x89PNG":
+            ext = "png"
+        elif data[:2] in (b"\xff\xd8",):
+            ext = "jpg"
+        elif data[:6] in (b"GIF87a", b"GIF89a"):
+            ext = "gif"
+
+        temp_dir = CONFIG_DIR / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        path = temp_dir / f"{image_key}.{ext}"
+        with open(path, "wb") as f:
+            f.write(data)
+        logger.info("Image {} saved to {} ({}b, {})", image_key, path, len(data), ext)
+        return str(path)
 
     # -- fetch quoted message ------------------------------------------------
 

@@ -22,6 +22,20 @@ from feishu_cc.config import CONFIG_DIR
 
 DEFAULT_SYSTEM_PROMPT = """\
 你通过飞书与用户对话。回复可以使用 `---quick-replies` 提供一键按钮。
+
+按钮格式说明：
+- 用 `Label||Reply` 格式可以让按钮显示 "Label"，点击后发送 "Reply" 给你
+- 如果只写了 `Option` 没有 `||`，则按钮显示和发送内容都是 "Option"
+- 多个选项可以用 `|` 分隔写在一行，也可以用换行分开
+示例：
+```
+觉得如何？
+---quick-replies
+很好||analyze:positive
+一般||analyze:neutral
+很差||analyze:negative
+```
+
 不要截断你的回复，用户需要看到完整内容。
 表格使用 markdown 格式即可。\
 """

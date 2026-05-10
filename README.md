@@ -4,6 +4,8 @@
 
 ## 架构
 
+![feishu-cc 架构](docs/architecture.jpg)
+
 ```
 飞书用户 ⇄ Feishu WS ⇄ feishu-cc ⇄ claude 子进程 (JSON 流)
 ```

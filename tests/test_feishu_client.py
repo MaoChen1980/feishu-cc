@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+from io import BytesIO
+from pathlib import Path
 
 from feishu_cc.feishu_client import FeishuClient
 
@@ -104,6 +106,23 @@ class TestParseQuickReplies:
             {"label": "取消", "reply": "取消"},
         ]
 
+    def test_marker_same_line_as_text(self) -> None:
+        """Claude often puts marker and options on same line as the question."""
+        content, qrs = _client._parse_quick_replies(
+            "测试一下 ---quick-replies 选项一|选项二|选项三"
+        )
+        assert content == "测试一下"
+        assert qrs == [
+            {"label": "选项一", "reply": "选项一"},
+            {"label": "选项二", "reply": "选项二"},
+            {"label": "选项三", "reply": "选项三"},
+        ]
+
+    def test_no_marker_returns_none(self) -> None:
+        content, qrs = _client._parse_quick_replies("纯文本，没有标记")
+        assert content == "纯文本，没有标记"
+        assert qrs is None
+
 
 class TestWrapTablesInCodeFences:
     def test_wrap_multi_row_table(self) -> None:
@@ -156,3 +175,156 @@ def test_send_reply_auto_mode_rich_content() -> None:
     client._send_plain_text = lambda cid, _: None  # type: ignore[method-assign]
     client.send_reply("chat_1", "root_1", "normal text")
     client.send_reply("chat_1", "root_1", "| h1 | h2 |\n| --- | --- |\n| a | b |")
+
+
+class TestDownloadImage:
+    def test_download_image_saves_file(self, monkeypatch, tmp_path) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+
+        class MockResponse:
+            code = 0
+            msg = ""
+            file = BytesIO(b"\x89PNG\r\n\x1a\n" + b"fake-png-data")
+            raw = type("obj", (object,), {"status_code": 200})()
+
+        class MockResourceService:
+            def get(self, request):
+                return MockResponse()
+
+        client._client = type("obj", (object,), {
+            "im": type("obj", (object,), {
+                "v1": type("obj", (object,), {
+                    "message_resource": MockResourceService()
+                })()
+            })()
+        })()
+
+        monkeypatch.setattr("feishu_cc.feishu_client.CONFIG_DIR", tmp_path)
+
+        path = client._download_image("msg_id_1", "img_test123")
+        assert path.endswith("img_test123.png")
+        assert Path(path).read_bytes() == b"\x89PNG\r\n\x1a\n" + b"fake-png-data"
+
+    def test_download_image_jpeg_format(self, monkeypatch, tmp_path) -> None:
+        """JPEG files should get .jpg extension."""
+        client = FeishuClient(app_id="t", app_secret="t")
+
+        class MockResponse:
+            code = 0
+            msg = ""
+            file = BytesIO(b"\xff\xd8\xff\xe0" + b"fake-jpeg-data")
+            raw = type("obj", (object,), {"status_code": 200})()
+
+        client._client = type("obj", (object,), {
+            "im": type("obj", (object,), {
+                "v1": type("obj", (object,), {
+                    "message_resource": type("obj", (object,), {
+                        "get": lambda self, req: MockResponse()
+                    })()
+                })()
+            })()
+        })()
+
+        monkeypatch.setattr("feishu_cc.feishu_client.CONFIG_DIR", tmp_path)
+
+        path = client._download_image("mid", "img_jpeg")
+        assert path.endswith("img_jpeg.jpg")
+        assert Path(path).read_bytes() == b"\xff\xd8\xff\xe0" + b"fake-jpeg-data"
+
+    def test_download_image_failure_returns_empty(self, monkeypatch, tmp_path) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+
+        class MockResponse:
+            code = 999
+            msg = "permission denied"
+            file = None
+            raw = type("obj", (object,), {"status_code": 403})()
+
+        class MockResourceService:
+            def get(self, request):
+                return MockResponse()
+
+        client._client = type("obj", (object,), {
+            "im": type("obj", (object,), {
+                "v1": type("obj", (object,), {
+                    "message_resource": MockResourceService()
+                })()
+            })()
+        })()
+
+        monkeypatch.setattr("feishu_cc.feishu_client.CONFIG_DIR", tmp_path)
+
+        path = client._download_image("msg_id_1", "img_fail")
+        assert path == ""
+
+    def test_image_key_detection_in_message(self) -> None:
+        """_on_message_wrapper with image_key calls _download_image and passes path."""
+        captured: list[str] = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_message=lambda s, c, t, mid: captured.append(t))
+
+        # Mock internals to avoid real API calls
+        client._download_image = lambda mid, k: f"/fake/{k}.png"  # type: ignore[method-assign]
+        client._check_duplicate = lambda *a: False  # type: ignore[method-assign]
+        client._add_reaction = lambda *a: None  # type: ignore[method-assign]
+
+        # Build a minimal mock data object
+        class MockAttrs:
+            pass
+
+        message = MockAttrs()
+        message.message_id = "msg_img_1"
+        message.content = '{"image_key": "img_xyz"}'
+        message.chat_id = "chat_1"
+        message.parent_id = None
+        message.message_type = "image"
+
+        sender = MockAttrs()
+        sender_id_obj = MockAttrs()
+        sender_id_obj.open_id = "open_1"
+        sender.sender_id = sender_id_obj
+
+        data = MockAttrs()
+        event = MockAttrs()
+        event.message = message
+        event.sender = sender
+        data.event = event
+
+        client._on_message_wrapper(data)
+        assert len(captured) == 1
+        assert "img_xyz.png" in captured[0]
+        assert "用户发送了一张图片" in captured[0]
+
+    def test_text_message_still_works(self) -> None:
+        """_on_message_wrapper still handles text messages correctly."""
+        captured: list[str] = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_message=lambda s, c, t, mid: captured.append(t))
+
+        client._check_duplicate = lambda *a: False  # type: ignore[method-assign]
+        client._add_reaction = lambda *a: None  # type: ignore[method-assign]
+
+        class MockAttrs:
+            pass
+
+        message = MockAttrs()
+        message.message_id = "msg_txt_1"
+        message.content = '{"text": "hello world"}'
+        message.chat_id = "chat_1"
+        message.parent_id = None
+        message.message_type = "text"
+
+        sender = MockAttrs()
+        sender_id_obj = MockAttrs()
+        sender_id_obj.open_id = "open_1"
+        sender.sender_id = sender_id_obj
+
+        data = MockAttrs()
+        event = MockAttrs()
+        event.message = message
+        event.sender = sender
+        data.event = event
+
+        client._on_message_wrapper(data)
+        assert len(captured) == 1
+        assert captured[0] == "hello world"

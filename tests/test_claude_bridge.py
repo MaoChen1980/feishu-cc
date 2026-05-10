@@ -130,6 +130,58 @@ class TestPermissionResponse:
         assert parsed["response"]["response"]["behavior"] == "deny"
 
 
+class TestResponseAccumulationExtra:
+    def test_thinking_block_ignored(self) -> None:
+        """Thinking blocks should not accumulate in response_text."""
+        bridge = _make_bridge()
+        bridge._response_text = ""
+
+        asyncio.run(bridge._handle_event({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "thinking text"},
+                    {"type": "text", "text": "final text"},
+                ],
+            },
+        }))
+        assert bridge._response_text == "final text"
+
+    def test_send_lock_is_lock(self) -> None:
+        """send_message uses asyncio.Lock for serialization."""
+        bridge = _make_bridge()
+        import asyncio
+        assert isinstance(bridge._send_lock, asyncio.Lock)
+
+
+class TestSessionManagementExtra:
+    def test_system_event_with_hook_id_sets_ready(self) -> None:
+        bridge = _make_bridge()
+        assert not bridge._ready.is_set()
+
+        asyncio.run(bridge._handle_event({
+            "type": "system",
+            "hook_id": "start",
+            "subtype": "hook_response",
+            "session_id": "sess_hook",
+        }))
+        assert bridge._ready.is_set()
+        assert bridge._session_id == "sess_hook"
+
+    def test_system_event_skips_empty_session_id_with_hook(self) -> None:
+        """hook_id event without session_id should not overwrite existing."""
+        bridge = _make_bridge()
+        bridge._session_id = "existing"
+
+        asyncio.run(bridge._handle_event({
+            "type": "system",
+            "hook_id": "start",
+            "subtype": "hook_response",
+            "session_id": "",
+        }))
+        assert bridge._session_id == "existing"
+
+
 class TestSendMessageFormat:
     def test_user_message_format(self) -> None:
         msg = {"type": "user", "message": {"role": "user", "content": "hello"}}

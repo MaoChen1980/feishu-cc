@@ -150,9 +150,10 @@ class FeishuCCApp:
             logger.info("[{}] Reply to {} ({} chars): {}", bot_name, chat_id, len(response), response)
             if response:
                 feishu.send_reply(chat_id, message_id, response)
-            if self._config.done_emoji:
-                feishu._add_reaction(message_id, self._config.done_emoji)
-            feishu._remove_reaction(message_id)
+            if message_id:
+                if self._config.done_emoji:
+                    feishu._add_reaction(message_id, self._config.done_emoji)
+                feishu._remove_reaction(message_id)
 
         rt.schedule(_handle())
 
