@@ -115,6 +115,17 @@ class ClaudeBridge:
         await self._response_done.wait()
         return self._response_text
 
+    async def restart(self, workspace: str) -> None:
+        """Restart the Claude subprocess with a new workspace."""
+        logger.info("[{}] Switching workspace to {}", self._bot_name, workspace)
+        self._workspace = workspace
+        await self.stop()
+        # Delete old session — workspace changed, start fresh
+        if self._session_file.exists():
+            self._session_file.unlink()
+        self._session_id = None
+        await self.start()
+
     async def respond_permission(self, request_id: str, behavior: str) -> None:
         """Respond to a permission request (allow/deny)."""
         msg = {

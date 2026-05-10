@@ -141,6 +141,14 @@ class FeishuCCApp:
             return
 
         try:
+            # Handle workspace switch command
+            if text.startswith("/workspace "):
+                new_workspace = text[len("/workspace "):].strip()
+                if new_workspace:
+                    rt.run_async(bridge.restart(new_workspace))
+                    feishu.send_reply(chat_id, message_id, f"工作目录已切换到：{new_workspace}")
+                    return
+
             response = rt.run_async(bridge.send_message(text))
             if response:
                 feishu.send_reply(chat_id, message_id, response)
