@@ -367,13 +367,25 @@ class FeishuClient:
     def send_permission_card(self, chat_id: str, prompt: str, request_id: str,
                              value: Optional[dict] = None) -> None:
         """Send a permission request card with allow/deny buttons."""
-        detail = prompt
+        action = "操作"
+        detail = ""
         if value:
-            extra = value.get("command") or value.get("path") or value.get("expression") or ""
-            if extra:
-                detail += f"\n\n`{extra}`"
+            if "command" in value:
+                action = "执行命令"
+                detail = value["command"]
+            elif "path" in value:
+                action = "操作文件"
+                detail = value["path"]
+            elif "pattern" in value:
+                action = "搜索文件"
+                detail = value["pattern"]
+            elif "expression" in value:
+                action = "计算表达式"
+                detail = value["expression"]
+        if not detail:
+            detail = prompt
         elements = [
-            {"tag": "markdown", "content": f"**Claude 需要权限**\n{detail}"},
+            {"tag": "markdown", "content": f"**Claude 请求：{action}**\n`{detail}`"},
             {
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": "允许"},
