@@ -69,6 +69,8 @@ class ClaudeBridge:
         on_text: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
         on_permission_request: Callable[[str, str, dict], None] | None = None,
+        on_tool_use: Callable[[str, str], None] | None = None,
+        on_task_summary: Callable[[str], None] | None = None,
     ):
         self._bot_name = bot_name
         self._claude_path = claude_path
@@ -77,6 +79,8 @@ class ClaudeBridge:
         self._on_text = on_text
         self._on_thinking = on_thinking
         self._on_permission_request = on_permission_request
+        self._on_tool_use = on_tool_use
+        self._on_task_summary = on_task_summary
 
         self._proc: subprocess.Popen | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -321,6 +325,11 @@ class ClaudeBridge:
                 summary = event.get("summary", "")
                 if summary:
                     self._task_summaries.append(summary)
+                    if self._on_task_summary:
+                        try:
+                            self._on_task_summary(summary)
+                        except Exception:
+                            logger.exception("[{}] on_task_summary callback failed", self._bot_name)
                 return
 
             logger.debug("[{}] System event: {}", self._bot_name, event)
@@ -333,11 +342,17 @@ class ClaudeBridge:
                     text = block.get("text", "")
                     self._response_text += text
                     if self._on_text:
-                        self._on_text(text)
+                        try:
+                            self._on_text(text)
+                        except Exception:
+                            logger.exception("[{}] on_text callback failed", self._bot_name)
                 elif block_type == "thinking":
                     thinking = block.get("thinking", "")
                     if self._on_thinking:
-                        self._on_thinking(thinking)
+                        try:
+                            self._on_thinking(thinking)
+                        except Exception:
+                            logger.exception("[{}] on_thinking callback failed", self._bot_name)
                 elif block_type == "tool_use":
                     name = block.get("name", "")
                     inp = block.get("input", {})
@@ -346,6 +361,12 @@ class ClaudeBridge:
                     else:
                         brief_inp = ""
                     logger.debug("[{}] Tool use: {}{}", self._bot_name, name, f" {brief_inp}" if brief_inp else "")
+                    if self._on_tool_use and name:
+                        brief = brief_inp[:120] if brief_inp else ""
+                        try:
+                            self._on_tool_use(name, brief)
+                        except Exception:
+                            logger.exception("[{}] on_tool_use callback failed", self._bot_name)
 
         elif event_type == "user":
             logger.debug("[{}] User event: {}", self._bot_name, event.get("message", {}).get("content", ""))
@@ -363,7 +384,10 @@ class ClaudeBridge:
             prompt = event.get("prompt", "Permission requested")
             value = event.get("value", {})
             if self._on_permission_request:
-                self._on_permission_request(request_id, prompt, value)
+                try:
+                    self._on_permission_request(request_id, prompt, value)
+                except Exception:
+                    logger.exception("[{}] on_permission_request callback failed", self._bot_name)
 
         else:
             logger.info("[{}] Unhandled event type: {} - {}", self._bot_name, event_type, event)

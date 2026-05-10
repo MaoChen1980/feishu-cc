@@ -155,7 +155,10 @@ class FeishuClient:
         self._add_reaction(message_id, self._react_emoji)
 
         if self._on_message:
-            self._on_message(sender_id, chat_id, full_text, message_id)
+            try:
+                self._on_message(sender_id, chat_id, full_text, message_id)
+            except Exception:
+                logger.exception("on_message callback failed")
 
     def _on_card_action_wrapper(self, data: Any) -> None:
         """Handle card button click."""
@@ -184,7 +187,10 @@ class FeishuClient:
         logger.info("Card action: {} -> {} (from {})", reply_text[:50], chat_id, sender_id)
 
         if self._on_card_action:
-            self._on_card_action(reply_text, chat_id, sender_id)
+            try:
+                self._on_card_action(reply_text, chat_id, sender_id)
+            except Exception:
+                logger.exception("on_card_action callback failed")
 
     # -- image handling -------------------------------------------------------
 
@@ -347,6 +353,10 @@ class FeishuClient:
         return "\n".join(result)
 
     # -- send reply ----------------------------------------------------------
+
+    def send_text(self, chat_id: str, text: str) -> None:
+        """Send a plain text message — no card/post processing, for notifications."""
+        self._send_plain_text(chat_id, text)
 
     def send_reply(self, chat_id: str, root_id: Optional[str], content: str) -> None:
         cleaned, qrs = self._parse_quick_replies(content)

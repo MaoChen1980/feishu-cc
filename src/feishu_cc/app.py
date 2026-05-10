@@ -11,7 +11,7 @@ from typing import Optional, Union
 
 from loguru import logger
 
-from feishu_cc.claude_bridge import ClaudeBridge
+from feishu_cc.claude_bridge import ClaudeBridge, _RESPONSE_TIMEOUT
 from feishu_cc.config import Config
 from feishu_cc.feishu_client import FeishuClient
 
@@ -99,6 +99,14 @@ class FeishuCCApp:
                 on_permission_request=lambda req_id, prompt, val: (
                     self._on_permission(feishu, bot_cfg.name, prompt, val, req_id, current_chat[0])
                 ),
+                on_tool_use=lambda name, brief: (
+                    self._on_tool_notify(feishu, current_chat[0], name, brief)
+                    if current_chat[0] else None
+                ),
+                on_task_summary=lambda summary: (
+                    feishu.send_text(current_chat[0], f"✅ {summary}")
+                    if current_chat[0] else None
+                ),
             )
 
             feishu = FeishuClient(
@@ -144,6 +152,14 @@ class FeishuCCApp:
     def _set_chat(current_chat: list[Optional[str]], chat_id: str) -> None:
         current_chat[0] = chat_id
 
+    @staticmethod
+    def _on_tool_notify(feishu: FeishuClient, chat_id: str, name: str, brief: str) -> None:
+        """Send a real-time tool_use notification to Feishu."""
+        text = f"> {name}"
+        if brief:
+            text += f" {brief}"
+        feishu.send_text(chat_id, text)
+
     # -- message routing -----------------------------------------------------
 
     def _on_message(self, bot_name: str, bridge: ClaudeBridge, feishu: FeishuClient,
@@ -160,21 +176,35 @@ class FeishuCCApp:
             new_workspace = text[len("/workspace "):].strip()
             if new_workspace:
                 async def _restart():
-                    await bridge.restart(new_workspace)
-                    feishu.send_reply(chat_id, message_id, f"工作目录已切换到：{new_workspace}")
+                    try:
+                        await bridge.restart(new_workspace)
+                        feishu.send_reply(chat_id, message_id, f"工作目录已切换到：{new_workspace}")
+                    except Exception:
+                        logger.exception("[{}] Failed to switch workspace for {}", bot_name, chat_id)
+                        feishu.send_plain_text(chat_id, "❌ 工作目录切换失败")
                 rt.schedule(_restart())
             return
 
         async def _handle():
-            response = await bridge.send_message(text)
-            logger.info("[{}] Reply to {} ({} chars): {}", bot_name, chat_id, len(response), response)
-            if response:
-                feishu.send_reply(chat_id, message_id, response)
-            if message_id:
-                if self._config.done_emoji:
-                    feishu._add_reaction(message_id, self._config.done_emoji)
-                feishu._remove_reaction(message_id)
-            feishu.send_plain_text(chat_id, "✅ 空闲")
+            try:
+                response = await bridge.send_message(text)
+                logger.info("[{}] Reply to {} ({} chars): {}", bot_name, chat_id, len(response), response)
+                if response:
+                    feishu.send_reply(chat_id, message_id, response)
+                if message_id:
+                    if self._config.done_emoji:
+                        feishu._add_reaction(message_id, self._config.done_emoji)
+                    feishu._remove_reaction(message_id)
+                feishu.send_plain_text(chat_id, "✅ 空闲")
+            except asyncio.TimeoutError:
+                logger.warning("[{}] Timeout processing message from {} ({}s)", bot_name, chat_id, _RESPONSE_TIMEOUT)
+                feishu.send_plain_text(chat_id, "⏰ 处理超时，请重试")
+            except ConnectionError:
+                logger.warning("[{}] Connection lost to Claude for {}", bot_name, chat_id)
+                feishu.send_plain_text(chat_id, "🔄 Claude 连接断开，正在自动重连，请稍后重试")
+            except Exception:
+                logger.exception("[{}] Unhandled error processing message from {}", bot_name, chat_id)
+                feishu.send_plain_text(chat_id, "❌ 处理消息时出错，请重试")
 
         rt.schedule(_handle())
 
