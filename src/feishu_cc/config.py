@@ -44,9 +44,10 @@ class Config:
     def load(cls, path: Optional[Union[str, Path]] = None) -> Config:
         path = Path(path) if path else CONFIG_FILE
         if not path.exists():
+            cls._create_template(path)
             raise FileNotFoundError(
-                f"Config not found at {path}. "
-                "Create the file with your Feishu bot credentials."
+                f"Template config created at {path}. "
+                "Please edit it with your bot credentials and re-run feishu-cc."
             )
 
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -62,4 +63,28 @@ class Config:
             render_mode=raw.get("render_mode", raw.get("renderMode", "card")),
             react_emoji=raw.get("react_emoji", raw.get("reactEmoji", "THUMBSUP")),
             done_emoji=raw.get("done_emoji", raw.get("doneEmoji")),
+        )
+
+    @classmethod
+    def _create_template(cls, path: Path) -> None:
+        """Create a template config file at the given path."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        template: dict[str, Any] = {
+            "bots": [
+                {
+                    "name": "my-bot",
+                    "appId": "cli_xxxxxxxxxxxxxxxxxxxx",
+                    "appSecret": "your_app_secret",
+                    "workspace": None,
+                    "system_prompt": None,
+                }
+            ],
+            "domain": "feishu",
+            "claude_path": "claude",
+            "render_mode": "card",
+            "react_emoji": "THUMBSUP",
+        }
+        path.write_text(
+            json.dumps(template, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
         )
