@@ -106,6 +106,20 @@ feishu-cc --log-level DEBUG
 
 每个 Bot 拥有独立的 Claude Code 子进程、workspace、session 和 system prompt。
 
+## 飞书开放平台配置注意事项
+
+使用 feishu-cc 时，飞书应用需使用 **长连接（WebSocket）** 方式接收事件。
+
+### 常见问题
+
+1. **服务器 URL 干扰** — 如果在飞书开放平台后台同时配置了服务器 URL（HTTP 回调），飞书可能优先将事件 POST 到该地址而非走 WebSocket。即使选择的是长连接，已填写的 URL 仍会干扰事件投递。解决：在 **飞书开放平台 → 你的应用 → 事件与回调 → 回调配置** 中清空服务器 URL。
+
+2. **事件订阅** — 确保已添加以下 Event：
+   - `im.message.receive_v1`（接收消息）
+   - `card.action.trigger`（卡片按钮回调）
+
+3. **权限** — 确保应用已获取 `im:message`、`im:chat` 等必要的权限范围，并在"安全中心"中添加 IP 白名单（如果有 HTTP 回调需要）。
+
 ## 测试
 
 ```bash

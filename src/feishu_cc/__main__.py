@@ -32,12 +32,8 @@ def main() -> None:
 
     from feishu_cc.app import FeishuCCApp
 
-    try:
-        app = FeishuCCApp(config_path=args.config)
-        app.run()
-    except Exception as e:
-        logger.error("Startup failed: {}", e)
-        sys.exit(1)
+    app = FeishuCCApp(config_path=args.config)
+    app.run()
 
 
 if __name__ == "__main__":

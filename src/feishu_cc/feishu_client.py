@@ -90,13 +90,9 @@ class FeishuClient:
             asyncio.set_event_loop(ws_loop)
             self._loop = ws_loop
             _lark_ws.client.loop = ws_loop
-            try:
-                ws_client.start()
-            except Exception as e:
-                logger.error("Feishu WS error: {}", e)
-            finally:
-                ws_loop.close()
-                logger.info("Feishu WS loop ended")
+            ws_client.start()
+            ws_loop.close()
+            logger.info("Feishu WS loop ended")
 
         thread = threading.Thread(target=run_ws, daemon=True)
         thread.start()
@@ -109,95 +105,84 @@ class FeishuClient:
     def _on_message_wrapper(self, data: Any) -> None:
         """Sync callback from Feishu SDK."""
         logger.info("Feishu on_message: {}", type(data).__name__)
-        try:
-            event = data.event
-            message = event.message
-            sender = event.sender
+        event = data.event
+        message = event.message
+        sender = event.sender
 
-            message_id = getattr(message, "message_id", None)
-            if not message_id or self._check_duplicate(message_id):
-                return
+        message_id = getattr(message, "message_id", None)
+        if not message_id or self._check_duplicate(message_id):
+            return
 
-            content = getattr(message, "content", "")
-            try:
-                content_obj = json.loads(content)
-                text = content_obj.get("text", "") if isinstance(content_obj, dict) else str(content_obj)
-            except Exception:
-                text = content
+        content = getattr(message, "content", "")
+        logger.info("Raw message content: {}", content)
+        content_obj = json.loads(content)
+        text = content_obj.get("text", "") if isinstance(content_obj, dict) else str(content_obj)
 
-            sender_id_obj = getattr(sender, "sender_id", None)
-            if sender_id_obj is not None and hasattr(sender_id_obj, "open_id"):
-                sender_id = sender_id_obj.open_id
-            else:
-                sender_id = str(sender_id_obj or "")
-            chat_id = getattr(message, "chat_id", "")
+        sender_id_obj = getattr(sender, "sender_id", None)
+        if sender_id_obj is not None and hasattr(sender_id_obj, "open_id"):
+            sender_id = sender_id_obj.open_id
+        else:
+            sender_id = str(sender_id_obj or "")
+        chat_id = getattr(message, "chat_id", "")
 
-            parent_id = getattr(message, "parent_id", None)
-            quoted_text = ""
-            if parent_id:
-                quoted_text = self._fetch_quoted_message(parent_id)
+        parent_id = getattr(message, "parent_id", None)
+        quoted_text = ""
+        if parent_id:
+            quoted_text = self._fetch_quoted_message(parent_id)
 
-            full_text = text
-            if quoted_text:
-                full_text = f'[引用]{quoted_text}\n---\n{text}'
+        full_text = text
+        if quoted_text:
+            full_text = f'[引用]{quoted_text}\n---\n{text}'
 
-            self._add_reaction(message_id, self._react_emoji)
+        self._add_reaction(message_id, self._react_emoji)
 
-            if self._on_message:
-                self._on_message(sender_id, chat_id, full_text, message_id)
-
-        except Exception as e:
-            logger.error("Feishu message handler error: {}", e)
+        if self._on_message:
+            self._on_message(sender_id, chat_id, full_text, message_id)
 
     def _on_card_action_wrapper(self, data: Any) -> None:
         """Handle card button click."""
-        try:
-            event = data.event
-            operator = event.operator
-            action = event.action
+        logger.info("Card action raw data: {}", data)
+        event = data.event
+        operator = event.operator
+        action = event.action
 
-            value: dict = action.value if isinstance(action.value, dict) else {}
-            reply_text = value.get("qr", "")
-            chat_id = value.get("cid", "")
-            if not reply_text or not chat_id:
-                logger.warning("Card action missing qr/cid: {}", value)
-                return
+        value: dict = action.value if isinstance(action.value, dict) else {}
+        reply_text = value.get("qr", "")
+        chat_id = value.get("cid", "")
+        if not reply_text or not chat_id:
+            logger.warning("Card action missing qr/cid: {}", value)
+            return
 
-            sender_id = operator.open_id if operator else ""
-            if not sender_id:
-                logger.warning("Card action missing open_id in operator")
-                return
+        sender_id = operator.open_id if operator else ""
+        if not sender_id:
+            logger.warning("Card action missing open_id in operator")
+            return
 
-            unique_id = f"card_{action.name or ''}_{int(time.time())}"
-            if self._check_duplicate(unique_id):
-                return
+        unique_id = f"card_{action.name or ''}_{int(time.time())}"
+        if self._check_duplicate(unique_id):
+            logger.info("Card action duplicate, skipped: {}", unique_id)
+            return
 
-            logger.info("Card action: {} -> {} (from {})", reply_text[:50], chat_id, sender_id)
+        logger.info("Card action: {} -> {} (from {})", reply_text[:50], chat_id, sender_id)
 
-            if self._on_card_action:
-                self._on_card_action(reply_text, chat_id, sender_id)
-
-        except Exception as e:
-            logger.error("Failed to handle card action: {}", e)
+        if self._on_card_action:
+            self._on_card_action(reply_text, chat_id, sender_id)
 
     # -- fetch quoted message ------------------------------------------------
 
     def _fetch_quoted_message(self, message_id: str) -> str:
-        try:
-            from lark_oapi.api.im.v1 import GetMessageRequest
+        from lark_oapi.api.im.v1 import GetMessageRequest
 
-            request = GetMessageRequest.builder().message_id(message_id).build()
-            response = self._client.im.v1.message.get(request)
-            if response.success():
-                items = response.data.items
-                if items:
-                    content_str = items[0].body.content
-                    obj = json.loads(content_str)
-                    if isinstance(obj, dict):
-                        return obj.get("text", "") or obj.get("content", "") or str(obj)
-                    return str(obj)
-        except Exception as e:
-            logger.debug("Failed to fetch quoted message {}: {}", message_id, e)
+        request = GetMessageRequest.builder().message_id(message_id).build()
+        response = self._client.im.v1.message.get(request)
+        if response.success():
+            items = response.data.items
+            if items:
+                content_str = items[0].body.content
+                obj = json.loads(content_str)
+                if isinstance(obj, dict):
+                    return obj.get("text", "") or obj.get("content", "") or str(obj)
+                return str(obj)
         return ""
 
     # -- deduplication -------------------------------------------------------
@@ -236,9 +221,11 @@ class FeishuClient:
     @staticmethod
     def _parse_quick_replies(content: str) -> tuple[str, Optional[list[dict[str, str]]]]:
         marker = "---quick-replies"
-        if marker not in content:
+        idx = content.rfind(marker)
+        if idx == -1:
             return content, None
-        before, section = content.split(marker, 1)
+        before = content[:idx]
+        section = content[idx + len(marker):]
         cleaned = before.strip()
         quick_replies: list[dict[str, str]] = []
         for line in section.strip().split("\n"):
@@ -248,6 +235,11 @@ class FeishuClient:
             if "||" in line:
                 label, reply = line.split("||", 1)
                 quick_replies.append({"label": label.strip(), "reply": reply.strip()})
+            elif "|" in line:
+                for item in line.split("|"):
+                    item = item.strip()
+                    if item:
+                        quick_replies.append({"label": item, "reply": item})
             else:
                 quick_replies.append({"label": line, "reply": line})
         return cleaned, quick_replies or None
@@ -287,16 +279,43 @@ class FeishuClient:
                 result.extend(table_lines)
         return "\n".join(result)
 
+    @staticmethod
+    def _strip_tables(text: str) -> str:
+        """Remove markdown tables from text, preserving everything else."""
+        lines = text.split("\n")
+        result: list[str] = []
+        in_table = False
+        for line in lines:
+            stripped = line.strip()
+            is_table = stripped.startswith("|") and stripped.endswith("|")
+            if is_table:
+                if not in_table:
+                    in_table = True
+            else:
+                if in_table:
+                    in_table = False
+                result.append(line)
+        return "\n".join(result).strip()
+
     # -- send reply ----------------------------------------------------------
 
     def send_reply(self, chat_id: str, root_id: Optional[str], content: str) -> None:
         cleaned, qrs = self._parse_quick_replies(content)
+        has_table = self._has_rich_content(cleaned)
         use_card = qrs is not None or self._render_mode == "card" or (
-            self._render_mode == "auto" and self._has_rich_content(cleaned)
+            self._render_mode == "auto" and has_table
         )
+
         if use_card:
-            if self._send_card_reply(chat_id, cleaned, quick_replies=qrs):
+            # Cards don't support tables → strip them and send separately
+            card_content = self._strip_tables(cleaned) if has_table else cleaned
+            if self._send_card_reply(chat_id, card_content, quick_replies=qrs):
+                if has_table:
+                    # Also send table as a follow-up post
+                    tabled = self._wrap_tables_in_code_fences(cleaned)
+                    self._send_post_reply(chat_id, tabled)
                 return
+
         processed = self._wrap_tables_in_code_fences(cleaned)
         if self._send_post_reply(chat_id, processed):
             return
@@ -310,19 +329,13 @@ class FeishuClient:
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": "允许"},
                 "type": "primary",
-                "behaviors": [{
-                    "type": "callback",
-                    "value": {"qr": f"__perm_allow__:{request_id}", "cid": chat_id},
-                }],
+                "behaviors": [{"type": "callback", "value": {"qr": f"__perm_allow__:{request_id}", "cid": chat_id}}],
             },
             {
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": "拒绝"},
                 "type": "danger",
-                "behaviors": [{
-                    "type": "callback",
-                    "value": {"qr": f"__perm_deny__:{request_id}", "cid": chat_id},
-                }],
+                "behaviors": [{"type": "callback", "value": {"qr": f"__perm_deny__:{request_id}", "cid": chat_id}}],
             },
         ]
         card = {"schema": "2.0", "config": {"width_mode": "fill"}, "body": {"elements": elements}}
@@ -334,131 +347,119 @@ class FeishuClient:
         self, chat_id: str, content: str,
         quick_replies: list[dict[str, str]] | None = None,
     ) -> bool:
-        try:
-            header_text, body = self._extract_header(content)
-            elements: list[dict[str, Any]] = [
-                {"tag": "markdown", "content": body or content},
-            ]
-            if quick_replies:
-                for qr in quick_replies:
-                    elements.append({
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": qr["label"]},
-                        "type": "default",
-                        "behaviors": [{"type": "callback", "value": {"qr": qr["reply"], "cid": chat_id}}],
-                    })
-            card: dict[str, Any] = {
-                "schema": "2.0",
-                "config": {"width_mode": "fill"},
-                "body": {"elements": elements},
+        # Cards don't support native markdown tables → wrap in code fences
+        content = self._wrap_tables_in_code_fences(content)
+        header_text, body = self._extract_header(content)
+        elements: list[dict[str, Any]] = [
+            {"tag": "markdown", "content": body or content},
+        ]
+        if quick_replies:
+            for qr in quick_replies:
+                elements.append({
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": qr["label"]},
+                    "type": "default",
+                    "behaviors": [{"type": "callback", "value": {"qr": qr["reply"], "cid": chat_id}}],
+                })
+        card: dict[str, Any] = {
+            "schema": "2.0",
+            "config": {"width_mode": "fill"},
+            "body": {"elements": elements},
+        }
+        if header_text:
+            card["header"] = {
+                "title": {"tag": "plain_text", "content": header_text},
+                "template": "blue",
             }
-            if header_text:
-                card["header"] = {
-                    "title": {"tag": "plain_text", "content": header_text},
-                    "template": "blue",
-                }
-            return self._send_card(card, chat_id)
-        except Exception as e:
-            logger.error("Card send exception: {}", e)
-            return False
+        return self._send_card(card, chat_id)
 
     def _send_card(self, card: dict[str, Any], chat_id: str) -> bool:
-        try:
-            from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+        from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
-            request = (
-                CreateMessageRequest.builder()
-                .receive_id_type("chat_id")
-                .request_body(
-                    CreateMessageRequestBody.builder()
-                    .receive_id(chat_id)
-                    .msg_type("interactive")
-                    .content(json.dumps(card))
-                    .build()
-                )
+        payload = json.dumps(card)
+        logger.info("Sending card to {}: {}", chat_id, payload)
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("interactive")
+                .content(payload)
                 .build()
             )
-            resp = self._client.im.v1.message.create(request)
-            if resp.success():
-                return True
-            logger.warning("Card send failed ({}): {}", resp.code, resp.msg)
-        except Exception as e:
-            logger.error("Card send exception: {}", e)
+            .build()
+        )
+        resp = self._client.im.v1.message.create(request)
+        if resp.success():
+            return True
+        logger.warning("Card send failed ({}): {}", resp.code, resp.msg)
         return False
 
     def _send_post_reply(self, chat_id: str, content: str) -> bool:
-        try:
-            from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+        from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
-            payload = {"zh_cn": {"content": [[{"tag": "md", "text": content}]]}}
-            request = (
-                CreateMessageRequest.builder()
-                .receive_id_type("chat_id")
-                .request_body(
-                    CreateMessageRequestBody.builder()
-                    .receive_id(chat_id)
-                    .msg_type("post")
-                    .content(json.dumps(payload))
-                    .build()
-                )
+        payload = {"zh_cn": {"content": [[{"tag": "md", "text": content}]]}}
+        payload_str = json.dumps(payload)
+        logger.info("Sending post to {}: {}", chat_id, payload_str)
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("post")
+                .content(payload_str)
                 .build()
             )
-            resp = self._client.im.v1.message.create(request)
-            if resp.success():
-                return True
-            logger.warning("Post send failed ({}): {}", resp.code, resp.msg)
-        except Exception as e:
-            logger.error("Post send exception: {}", e)
+            .build()
+        )
+        resp = self._client.im.v1.message.create(request)
+        if resp.success():
+            return True
+        logger.warning("Post send failed ({}): {}", resp.code, resp.msg)
         return False
 
     def _send_plain_text(self, chat_id: str, content: str) -> None:
-        try:
-            from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+        from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
-            request = (
-                CreateMessageRequest.builder()
-                .receive_id_type("chat_id")
-                .request_body(
-                    CreateMessageRequestBody.builder()
-                    .receive_id(chat_id)
-                    .msg_type("text")
-                    .content(json.dumps({"text": content}))
-                    .build()
-                )
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("text")
+                .content(json.dumps({"text": content}))
                 .build()
             )
-            self._client.im.v1.message.create(request)
-        except Exception as e:
-            logger.error("Plain-text fallback failed: {}", e)
+            .build()
+        )
+        logger.info("Sending plain text to {}: {}", chat_id, content)
+        self._client.im.v1.message.create(request)
 
     # -- reactions -----------------------------------------------------------
 
     def _add_reaction(self, message_id: str, emoji: str) -> None:
         if not emoji:
             return
-        try:
-            from lark_oapi.api.im.v1 import (
-                CreateMessageReactionRequest, CreateMessageReactionRequestBody, Emoji,
-            )
-            request = (
-                CreateMessageReactionRequest.builder()
-                .message_id(message_id)
-                .request_body(
-                    CreateMessageReactionRequestBody.builder()
-                    .reaction_type(Emoji.builder().emoji_type(emoji).build())
-                    .build()
-                )
+        from lark_oapi.api.im.v1 import (
+            CreateMessageReactionRequest, CreateMessageReactionRequestBody, Emoji,
+        )
+        request = (
+            CreateMessageReactionRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                CreateMessageReactionRequestBody.builder()
+                .reaction_type(Emoji.builder().emoji_type(emoji).build())
                 .build()
             )
-            self._client.im.v1.message_reaction.create(request)
-        except Exception as e:
-            logger.debug("Failed to add reaction: {}", e)
+            .build()
+        )
+        self._client.im.v1.message_reaction.create(request)
 
     def _remove_reaction(self, message_id: str) -> None:
-        try:
-            from lark_oapi.api.im.v1 import DeleteMessageReactionRequest
+        from lark_oapi.api.im.v1 import DeleteMessageReactionRequest
 
-            request = DeleteMessageReactionRequest.builder().message_id(message_id).build()
-            self._client.im.v1.message_reaction.delete(request)
-        except Exception as e:
-            logger.debug("Failed to remove reaction: {}", e)
+        request = DeleteMessageReactionRequest.builder().message_id(message_id).build()
+        self._client.im.v1.message_reaction.delete(request)

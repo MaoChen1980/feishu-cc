@@ -48,13 +48,13 @@ class TestResponseAccumulation:
         asyncio.run(bridge._handle_event({"type": "result", "done": True}))
         assert bridge._response_done.is_set()
 
-    def test_result_not_done_no_event(self) -> None:
+    def test_result_always_sets_done(self) -> None:
         bridge = _make_bridge()
         bridge._response_done.set()
         bridge._response_done.clear()
 
         asyncio.run(bridge._handle_event({"type": "result"}))
-        assert not bridge._response_done.is_set()
+        assert bridge._response_done.is_set()
 
 
 class TestSessionManagement:

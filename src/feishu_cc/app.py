@@ -44,13 +44,16 @@ class _BotRuntime:
         if self._thread:
             self._thread.join(timeout=3)
 
-    def run_async(self, coro) -> None:
+    def run_async(self, coro):
         """Schedule a coroutine on this bot's event loop and wait for the result,
         bridging from a synchronous (Feishu callback) thread.
         """
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        # We block in the calling thread (Feishu callback thread) until done
-        future.result()
+        return future.result()
+
+    def schedule(self, coro) -> None:
+        """Fire-and-forget a coroutine on this bot's event loop."""
+        asyncio.run_coroutine_threadsafe(coro, self.loop)
 
 
 class FeishuCCApp:
@@ -112,14 +115,8 @@ class FeishuCCApp:
 
         logger.info("All bots started — waiting for messages...")
 
-        try:
-            while True:
-                time.sleep(10)
-        except KeyboardInterrupt:
-            logger.info("Shutting down...")
-            for rt in self._bots:
-                rt.run_async(rt.bridge.stop())
-                rt.stop_loop()
+        while True:
+            time.sleep(10)
 
     # -- helpers -------------------------------------------------------------
 
@@ -134,30 +131,30 @@ class FeishuCCApp:
         """Handle incoming Feishu message → send to Claude → reply."""
         logger.info("[{}] Message from {}: {}", bot_name, chat_id, text[:80])
 
-        # Find the bot runtime to schedule on its loop
         rt = _find_runtime(self._bots, bridge)
         if not rt:
             logger.error("[{}] Runtime not found", bot_name)
             return
 
-        try:
-            # Handle workspace switch command
-            if text.startswith("/workspace "):
-                new_workspace = text[len("/workspace "):].strip()
-                if new_workspace:
-                    rt.run_async(bridge.restart(new_workspace))
+        if text.startswith("/workspace "):
+            new_workspace = text[len("/workspace "):].strip()
+            if new_workspace:
+                async def _restart():
+                    await bridge.restart(new_workspace)
                     feishu.send_reply(chat_id, message_id, f"工作目录已切换到：{new_workspace}")
-                    return
+                rt.schedule(_restart())
+            return
 
-            response = rt.run_async(bridge.send_message(text))
+        async def _handle():
+            response = await bridge.send_message(text)
+            logger.info("[{}] Reply to {} ({} chars): {}", bot_name, chat_id, len(response), response)
             if response:
                 feishu.send_reply(chat_id, message_id, response)
             if self._config.done_emoji:
                 feishu._add_reaction(message_id, self._config.done_emoji)
             feishu._remove_reaction(message_id)
-        except Exception as e:
-            logger.error("[{}] Failed to process message: {}", bot_name, e)
-            feishu.send_reply(chat_id, message_id, f"处理消息时出错：{e}")
+
+        rt.schedule(_handle())
 
     def _on_card_action(self, bot_name: str, bridge: ClaudeBridge, feishu: FeishuClient,
                         chat_id: str, reply_text: str, sender_id: str) -> None:
@@ -169,17 +166,11 @@ class FeishuCCApp:
 
         if reply_text.startswith("__perm_allow__:"):
             request_id = reply_text.split(":", 1)[1]
-            try:
-                rt.run_async(bridge.respond_permission(request_id, "allow"))
-            except Exception as e:
-                logger.error("[{}] Permission allow failed: {}", bot_name, e)
+            rt.schedule(bridge.respond_permission(request_id, "allow"))
             return
         if reply_text.startswith("__perm_deny__:"):
             request_id = reply_text.split(":", 1)[1]
-            try:
-                rt.run_async(bridge.respond_permission(request_id, "deny"))
-            except Exception as e:
-                logger.error("[{}] Permission deny failed: {}", bot_name, e)
+            rt.schedule(bridge.respond_permission(request_id, "deny"))
             return
 
         # Normal card reply → forward to Claude as user message

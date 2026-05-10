@@ -83,6 +83,27 @@ class TestParseQuickReplies:
         assert content == "Body"
         assert qrs == [{"label": "Action", "reply": "do"}]
 
+    def test_single_pipe_splits_into_multiple_buttons(self) -> None:
+        content, qrs = _client._parse_quick_replies(
+            "Choose:\n---quick-replies\n很快没问题|有点延迟|功能没问题"
+        )
+        assert content == "Choose:"
+        assert qrs == [
+            {"label": "很快没问题", "reply": "很快没问题"},
+            {"label": "有点延迟", "reply": "有点延迟"},
+            {"label": "功能没问题", "reply": "功能没问题"},
+        ]
+
+    def test_ignores_inline_marker_in_content(self) -> None:
+        content, qrs = _client._parse_quick_replies(
+            "你可以使用 ---quick-replies 来添加按钮。试试以下选项。\n---quick-replies\n确认||确认\n取消||取消"
+        )
+        assert content == "你可以使用 ---quick-replies 来添加按钮。试试以下选项。"
+        assert qrs == [
+            {"label": "确认", "reply": "确认"},
+            {"label": "取消", "reply": "取消"},
+        ]
+
 
 class TestWrapTablesInCodeFences:
     def test_wrap_multi_row_table(self) -> None:
@@ -129,5 +150,9 @@ class TestCheckDuplicate:
 def test_send_reply_auto_mode_rich_content() -> None:
     """send_reply with render_mode=auto and tables should prefer card."""
     client = FeishuClient(app_id="t", app_secret="t", render_mode="auto")
+    # Mock send methods that require a live client — this test only checks routing
+    client._send_card = lambda c, cid: bool(cid)  # type: ignore[method-assign]
+    client._send_post_reply = lambda cid, _: bool(cid)  # type: ignore[method-assign]
+    client._send_plain_text = lambda cid, _: None  # type: ignore[method-assign]
     client.send_reply("chat_1", "root_1", "normal text")
     client.send_reply("chat_1", "root_1", "| h1 | h2 |\n| --- | --- |\n| a | b |")
