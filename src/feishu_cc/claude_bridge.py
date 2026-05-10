@@ -71,6 +71,7 @@ class ClaudeBridge:
         self._response_done = asyncio.Event()
         self._ready = asyncio.Event()
         self._alive = False
+        self._send_lock = asyncio.Lock()
         self._session_file = CONFIG_DIR / "sessions" / f"{bot_name}.session"
 
         # Stderr diagnostics buffer (fed by drain thread, always in memory)
@@ -178,18 +179,19 @@ class ClaudeBridge:
 
     async def send_message(self, text: str, timeout: float = _RESPONSE_TIMEOUT) -> str:
         """Send a user message to Claude and wait for the complete response."""
-        if not self._ready.is_set():
-            logger.info("[{}] Waiting for Claude to finish initializing...", self._bot_name)
-            await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
+        async with self._send_lock:
+            if not self._ready.is_set():
+                logger.info("[{}] Waiting for Claude to finish initializing...", self._bot_name)
+                await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
 
-        self._response_text = ""
-        self._response_done.clear()
+            self._response_text = ""
+            self._response_done.clear()
 
-        msg = {"type": "user", "message": {"role": "user", "content": text}}
-        await self._write_json(msg)
+            msg = {"type": "user", "message": {"role": "user", "content": text}}
+            await self._write_json(msg)
 
-        await asyncio.wait_for(self._response_done.wait(), timeout=timeout)
-        return self._response_text
+            await asyncio.wait_for(self._response_done.wait(), timeout=timeout)
+            return self._response_text
 
     async def restart(self, workspace: str) -> None:
         logger.info("[{}] Switching workspace to {}", self._bot_name, workspace)
