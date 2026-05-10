@@ -2,9 +2,9 @@
 name = "feishu-cc"
 version = "0.1.0"
 description = "Feishu IM bridge for Claude Code CLI"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = [
-    "lark-oapi>=3.6.0",
+    "lark-oapi>=1.6.0",
     "loguru>=0.7.0",
 ]
 

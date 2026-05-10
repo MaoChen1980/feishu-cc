@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from loguru import logger
 
@@ -31,8 +31,8 @@ class ClaudeBridge:
         self,
         bot_name: str,
         claude_path: str = "claude",
-        workspace: str | None = None,
-        system_prompt: str | None = None,
+        workspace: Optional[str] = None,
+        system_prompt: Optional[str] = None,
         *,
         on_text: Callable[[str], None] | None = None,
         on_thinking: Callable[[str], None] | None = None,
@@ -47,7 +47,7 @@ class ClaudeBridge:
         self._on_permission_request = on_permission_request
 
         self._process: asyncio.subprocess.Process | None = None
-        self._session_id: str | None = None
+        self._session_id: Optional[str] = None
         self._response_text: str = ""
         self._response_done = asyncio.Event()
         self._running = False
@@ -56,7 +56,7 @@ class ClaudeBridge:
     # -- lifecycle -----------------------------------------------------------
 
     @property
-    def session_id(self) -> str | None:
+    def session_id(self) -> Optional[str]:
         return self._session_id
 
     async def start(self) -> None:
@@ -214,7 +214,7 @@ class ClaudeBridge:
         self._session_file.parent.mkdir(parents=True, exist_ok=True)
         self._session_file.write_text(session_id, encoding="utf-8")
 
-    def _load_session(self) -> str | None:
+    def _load_session(self) -> Optional[str]:
         """Load persisted session_id for resume."""
         if self._session_file.exists():
             sid = self._session_file.read_text(encoding="utf-8").strip()

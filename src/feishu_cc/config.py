@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional, Union
 
 
 CONFIG_DIR = Path.home() / ".feishu-cc"
@@ -17,8 +17,8 @@ class BotConfig:
     name: str
     app_id: str
     app_secret: str
-    workspace: str | None = None
-    system_prompt: str | None = None
+    workspace: Optional[str] = None
+    system_prompt: Optional[str] = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BotConfig:
@@ -38,10 +38,10 @@ class Config:
     claude_path: str = "claude"
     render_mode: str = "card"
     react_emoji: str = "THUMBSUP"
-    done_emoji: str | None = None
+    done_emoji: Optional[str] = None
 
     @classmethod
-    def load(cls, path: str | Path | None = None) -> Config:
+    def load(cls, path: Optional[Union[str, Path]] = None) -> Config:
         path = Path(path) if path else CONFIG_FILE
         if not path.exists():
             raise FileNotFoundError(

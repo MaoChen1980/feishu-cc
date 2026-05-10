@@ -6,6 +6,7 @@ import asyncio
 import threading
 import time
 from pathlib import Path
+from typing import Optional, Union
 
 from loguru import logger
 
@@ -21,7 +22,7 @@ class _BotRuntime:
         self.name = name
         self.feishu = feishu
         self.bridge = bridge
-        self.loop: asyncio.AbstractEventLoop | None = None
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: threading.Thread | None = None
 
     def start_loop(self) -> None:
@@ -54,7 +55,7 @@ class _BotRuntime:
 class FeishuCCApp:
     """Main application. Wires Feishu WS → Claude Bridge for each bot."""
 
-    def __init__(self, config_path: str | Path | None = None):
+    def __init__(self, config_path: Optional[Union[str, Path]] = None):
         self._config = Config.load(config_path)
         self._bots: list[_BotRuntime] = []
 
@@ -69,7 +70,7 @@ class FeishuCCApp:
 
             # Track current chat on the bridge so permission callbacks
             # know where to send the permission card.
-            current_chat: list[str | None] = [None]
+            current_chat: list[Optional[str]] = [None]
 
             bridge = ClaudeBridge(
                 bot_name=bot_cfg.name,
@@ -121,7 +122,7 @@ class FeishuCCApp:
     # -- helpers -------------------------------------------------------------
 
     @staticmethod
-    def _set_chat(current_chat: list[str | None], chat_id: str) -> None:
+    def _set_chat(current_chat: list[Optional[str]], chat_id: str) -> None:
         current_chat[0] = chat_id
 
     # -- message routing -----------------------------------------------------
@@ -175,7 +176,7 @@ class FeishuCCApp:
         self._on_message(bot_name, bridge, feishu, chat_id, reply_text, "")
 
     def _on_permission(self, feishu: FeishuClient, bot_name: str,
-                       prompt: str, request_id: str, chat_id: str | None) -> None:
+                       prompt: str, request_id: str, chat_id: Optional[str]) -> None:
         """Send permission request to Feishu user."""
         logger.info("[{}] Permission requested: {}", bot_name, prompt)
         if chat_id:

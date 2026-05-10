@@ -8,7 +8,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from loguru import logger
 
@@ -23,12 +23,12 @@ class FeishuClient:
         domain: str = "https://open.feishu.cn",
         render_mode: str = "card",
         react_emoji: str = "THUMBSUP",
-        done_emoji: str | None = None,
+        done_emoji: Optional[str] = None,
         encrypt_key: str = "",
         verification_token: str = "",
         *,
-        on_message: Callable[[str, str, str, str], None] | None = None,
-        on_card_action: Callable[[str, str, str], None] | None = None,
+        on_message: Optional[Callable[[str, str, str, str], None]] = None,
+        on_card_action: Optional[Callable[[str, str, str], None]] = None,
     ):
         self._app_id = app_id
         self._app_secret = app_secret
@@ -44,7 +44,7 @@ class FeishuClient:
         self._client: Any = None
         self._thread_pool = ThreadPoolExecutor(max_workers=10)
         self._dedup: dict[str, float] = {}
-        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -221,7 +221,7 @@ class FeishuClient:
         return bool(re.search(r'\|.+\|\r?\n\|[-:| ]+\|', text))
 
     @staticmethod
-    def _extract_header(content: str) -> tuple[str | None, str]:
+    def _extract_header(content: str) -> tuple[Optional[str], str]:
         lines = content.split("\n")
         for i, line in enumerate(lines[:10]):
             stripped = line.strip()
@@ -234,7 +234,7 @@ class FeishuClient:
         return None, content
 
     @staticmethod
-    def _parse_quick_replies(content: str) -> tuple[str, list[dict[str, str]] | None]:
+    def _parse_quick_replies(content: str) -> tuple[str, Optional[list[dict[str, str]]]]:
         marker = "---quick-replies"
         if marker not in content:
             return content, None
@@ -289,7 +289,7 @@ class FeishuClient:
 
     # -- send reply ----------------------------------------------------------
 
-    def send_reply(self, chat_id: str, root_id: str | None, content: str) -> None:
+    def send_reply(self, chat_id: str, root_id: Optional[str], content: str) -> None:
         cleaned, qrs = self._parse_quick_replies(content)
         use_card = qrs is not None or self._render_mode == "card" or (
             self._render_mode == "auto" and self._has_rich_content(cleaned)
