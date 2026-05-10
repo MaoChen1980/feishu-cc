@@ -83,7 +83,7 @@ class FeishuCCApp:
                 workspace=bot_cfg.workspace or launch_dir,
                 system_prompt=bot_cfg.system_prompt,
                 on_permission_request=lambda req_id, prompt, val: (
-                    self._on_permission(feishu, bot_cfg.name, prompt, req_id, current_chat[0])
+                    self._on_permission(feishu, bot_cfg.name, prompt, val, req_id, current_chat[0])
                 ),
             )
 
@@ -178,11 +178,11 @@ class FeishuCCApp:
         self._on_message(bot_name, bridge, feishu, chat_id, reply_text, "")
 
     def _on_permission(self, feishu: FeishuClient, bot_name: str,
-                       prompt: str, request_id: str, chat_id: Optional[str]) -> None:
+                       prompt: str, value: dict, request_id: str, chat_id: Optional[str]) -> None:
         """Send permission request to Feishu user."""
-        logger.info("[{}] Permission requested: {}", bot_name, prompt)
+        logger.info("[{}] Permission requested: {} {}", bot_name, prompt, value)
         if chat_id:
-            feishu.send_permission_card(chat_id, prompt, request_id)
+            feishu.send_permission_card(chat_id, prompt, request_id, value)
         else:
             logger.warning("[{}] No chat_id for permission request", bot_name)
 
