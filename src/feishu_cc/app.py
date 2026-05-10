@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import time
 from pathlib import Path
@@ -61,6 +62,7 @@ class FeishuCCApp:
 
     def run(self) -> None:
         """Start all bots and block forever."""
+        launch_dir = os.getcwd()
         for bot_cfg in self._config.bots:
             domain = (
                 "https://open.feishu.cn"
@@ -75,7 +77,7 @@ class FeishuCCApp:
             bridge = ClaudeBridge(
                 bot_name=bot_cfg.name,
                 claude_path=self._config.claude_path,
-                workspace=bot_cfg.workspace,
+                workspace=bot_cfg.workspace or launch_dir,
                 system_prompt=bot_cfg.system_prompt,
                 on_permission_request=lambda req_id, prompt, val: (
                     self._on_permission(feishu, bot_cfg.name, prompt, req_id, current_chat[0])
