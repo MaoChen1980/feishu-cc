@@ -328,3 +328,432 @@ class TestDownloadImage:
         client._on_message_wrapper(data)
         assert len(captured) == 1
         assert captured[0] == "hello world"
+
+
+class TestNoop:
+    def test_noop_does_nothing(self) -> None:
+        assert _client._noop("anything") is None
+        assert _client._noop(42) is None
+
+
+class TestFormatPermissionValue:
+    def test_flat_dict(self) -> None:
+        r = _client._format_permission_value({"tool": "bash", "cmd": "ls"})
+        assert "**tool**" in r and "`bash`" in r
+        assert "**cmd**" in r and "`ls`" in r
+
+    def test_nested_dict(self) -> None:
+        r = _client._format_permission_value({
+            "tool": "bash", "args": {"cmd": "ls", "timeout": "30"},
+        })
+        assert "**args**" in r
+        assert "**cmd**" in r
+
+    def test_list_values(self) -> None:
+        r = _client._format_permission_value({"files": ["a.py", "b.py"]})
+        assert "`a.py`" in r
+        assert "`b.py`" in r
+
+    def test_skips_redundant_tool_use(self) -> None:
+        r = _client._format_permission_value({
+            "tool_name": "bash",
+            "tool_use": {"cmd": "ls"},
+            "tool_args": '{"cmd": "ls"}',
+        })
+        assert "**tool_name**" in r
+        assert "**tool_use**" not in r  # skipped as redundant
+        assert "**tool_args**" in r
+
+
+class TestOnCardActionWrapper:
+    """_on_card_action_wrapper — card button click handling."""
+
+    def _data(self, *, qr="confirm", cid="chat_1", open_id="open_1", action_name="btn_1"):
+        class _M:
+            pass
+        val = _M()
+        val.qr = qr
+        val.cid = cid
+        act = _M()
+        act.value = val
+        act.name = action_name
+        op = _M()
+        op.open_id = open_id
+        evt = _M()
+        evt.action = act
+        evt.operator = op
+        d = _M()
+        d.event = evt
+        return d
+
+    def test_normal(self) -> None:
+        captured: list = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_card_action=lambda r, c, s: captured.append((r, c, s)))
+        client._check_duplicate = lambda _: False  # type: ignore
+        client._on_card_action_wrapper(self._data())
+        assert captured == [("confirm", "chat_1", "open_1")]
+
+    def test_missing_qr_early_return(self) -> None:
+        captured: list = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_card_action=lambda *a: captured.append(a))
+        client._check_duplicate = lambda _: False  # type: ignore
+        client._on_card_action_wrapper(self._data(qr=""))
+        assert captured == []
+
+    def test_missing_cid_early_return(self) -> None:
+        captured: list = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_card_action=lambda *a: captured.append(a))
+        client._check_duplicate = lambda _: False  # type: ignore
+        client._on_card_action_wrapper(self._data(cid=""))
+        assert captured == []
+
+    def test_missing_open_id_early_return(self) -> None:
+        captured: list = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_card_action=lambda *a: captured.append(a))
+        client._check_duplicate = lambda _: False  # type: ignore
+        client._on_card_action_wrapper(self._data(open_id=""))
+        assert captured == []
+
+    def test_duplicate_skipped(self) -> None:
+        captured: list = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_card_action=lambda *a: captured.append(a))
+        client._check_duplicate = lambda _: True  # type: ignore
+        client._on_card_action_wrapper(self._data())
+        assert captured == []
+
+    def test_callback_exception_caught(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_card_action=lambda *a: (_ for _ in ()).throw(RuntimeError("x")))
+        client._check_duplicate = lambda _: False  # type: ignore
+        client._on_card_action_wrapper(self._data())  # should not raise
+
+    def test_value_not_dict_empty_fallback(self) -> None:
+        captured: list = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_card_action=lambda *a: captured.append(a))
+        client._check_duplicate = lambda _: False  # type: ignore
+        class _M:
+            pass
+        act = _M()
+        act.value = "not_a_dict"
+        act.name = "b"
+        op = _M()
+        op.open_id = "o"
+        evt = _M()
+        evt.action = act
+        evt.operator = op
+        d = _M()
+        d.event = evt
+        client._on_card_action_wrapper(d)
+        assert captured == []
+
+
+class TestSendPermissionCard:
+    def test_basic(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        sent: list = []
+        client._send_card = lambda c, cid: sent.append(c) or True  # type: ignore
+        client.send_permission_card("chat_1", "Allow?", "req_1")
+        els = sent[0]["body"]["elements"]
+        assert len(els) == 4
+        assert els[1]["text"]["content"] == "🟢 允许一次"
+        assert els[2]["text"]["content"] == "允许本次"
+        assert els[3]["text"]["content"] == "拒绝"
+
+    def test_with_tool_value(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        sent: list = []
+        client._send_card = lambda c, cid: sent.append(c) or True  # type: ignore
+        client.send_permission_card("chat_1", "Allow?", "req_2", value={
+            "tool_name": "Bash",
+            "tool_args": {"cmd": "ls"},
+            "permission_prompt": "Run shell?",
+        })
+        c = sent[0]["body"]["elements"][0]["content"]
+        assert "Bash" in c and "Run shell?" in c
+
+    def test_empty_value_uses_prompt(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        sent: list = []
+        client._send_card = lambda c, cid: sent.append(c) or True  # type: ignore
+        client.send_permission_card("chat_1", "Allow?", "req_3", value={})
+        assert sent[0]["body"]["elements"][0]["content"] == "Allow?"
+
+
+class TestSendCardReply:
+    def test_with_header(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        sent: list = []
+        client._send_card = lambda c, cid: sent.append((c, cid)) or True  # type: ignore
+        client._send_card_reply("chat_1", "# Title\n\nBody")
+        card, cid = sent[0]
+        assert cid == "chat_1"
+        assert card["header"]["title"]["content"] == "Title"
+
+    def test_without_header(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        sent: list = []
+        client._send_card = lambda c, cid: sent.append(c) or True  # type: ignore
+        client._send_card_reply("chat_1", "No header")
+        assert "header" not in sent[0]
+
+    def test_with_quick_replies(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        sent: list = []
+        client._send_card = lambda c, cid: sent.append(c) or True  # type: ignore
+        client._send_card_reply("chat_1", "Pick:", quick_replies=[
+            {"label": "Y", "reply": "yes"}, {"label": "N", "reply": "no"},
+        ])
+        els = sent[0]["body"]["elements"]
+        assert len(els) == 3
+        assert els[1]["text"]["content"] == "Y"
+        assert els[2]["value"]["cid"] == "chat_1"
+
+
+class TestSendReplyRouting:
+    def test_plain_text_fallback(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t", render_mode="text")
+        plain: list = []
+        client.send_plain_text = lambda cid, t: plain.append(t)  # type: ignore
+        client._send_post_reply = lambda cid, c: False  # type: ignore
+        client.send_reply("chat_1", None, "hello")
+        assert plain == ["hello"]
+
+    def test_card_mode_uses_card(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t", render_mode="card")
+        card_sent: list = []
+        client._send_card_reply = lambda cid, c, **kw: card_sent.append((cid, c)) or True  # type: ignore
+        client.send_reply("chat_1", None, "hello")
+        assert card_sent == [("chat_1", "hello")]
+
+    def test_auto_mode_with_table_uses_card(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t", render_mode="auto")
+        card_sent: list = []
+        client._send_card_reply = lambda cid, c, **kw: card_sent.append((cid, c)) or True  # type: ignore
+        client.send_reply("chat_1", None, "| h1 | h2 |\n| --- | --- |\n| a | b |")
+        assert len(card_sent) == 1
+
+
+class TestSendImplementations:
+    """_send_card, _send_post_reply, send_plain_text — low-level send via SDK."""
+
+    def _mock_client(self, client, success: bool):
+        class R:
+            code = 0 if success else 999
+            msg = "" if success else "fail"
+            def success(self): return success
+        class S:
+            def create(self, req): return R()
+        client._client = type("obj", (object,), {
+            "im": type("obj", (object,), {
+                "v1": type("obj", (object,), {"message": S()})(),
+            })(),
+        })()
+
+    def test_send_card_success(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        self._mock_client(client, True)
+        assert client._send_card({"schema": "2.0"}, "chat_1") is True
+
+    def test_send_card_failure(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        self._mock_client(client, False)
+        assert client._send_card({"schema": "2.0"}, "chat_1") is False
+
+    def test_send_post_success(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        self._mock_client(client, True)
+        assert client._send_post_reply("chat_1", "hello") is True
+
+    def test_send_post_failure(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        self._mock_client(client, False)
+        assert client._send_post_reply("chat_1", "hello") is False
+
+    def test_send_plain_text(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        calls = 0
+        class R:
+            def success(self): return True
+        class S:
+            def create(self, req):
+                nonlocal calls
+                calls += 1
+                return R()
+        client._client = type("obj", (object,), {
+            "im": type("obj", (object,), {
+                "v1": type("obj", (object,), {"message": S()})(),
+            })(),
+        })()
+        client.send_plain_text("chat_1", "hello")
+        assert calls == 1
+
+
+class TestAddRemoveReaction:
+    def test_add_noop_when_emoji_empty(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        client._add_reaction("msg_1", "")
+        client._add_reaction("msg_1", None)  # type: ignore
+
+    def test_remove_reaction(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        class S:
+            def delete(self, req): pass
+        client._client = type("obj", (object,), {
+            "im": type("obj", (object,), {
+                "v1": type("obj", (object,), {
+                    "message_reaction": S(),
+                })(),
+            })(),
+        })()
+        client._remove_reaction("msg_1")  # should not raise
+
+
+class TestCleanupTemp:
+    def test_cleans_old_files(self, monkeypatch, tmp_path) -> None:
+        import os, time as tm
+        monkeypatch.setattr("feishu_cc.feishu_client.CONFIG_DIR", tmp_path)
+        td = tmp_path / "temp"
+        td.mkdir()
+        old_f = td / "old.txt"
+        old_f.write_text("x")
+        os.utime(str(old_f), (tm.time() - 86400 * 2, tm.time() - 86400 * 2))
+        new_f = td / "new.txt"
+        new_f.write_text("x")
+        FeishuClient(app_id="t", app_secret="t")._cleanup_temp()
+        assert not old_f.exists()
+        assert new_f.exists()
+
+    def test_missing_temp_dir(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setattr("feishu_cc.feishu_client.CONFIG_DIR", tmp_path)
+        FeishuClient(app_id="t", app_secret="t")._cleanup_temp()  # no raise
+
+
+class TestFetchQuotedMessage:
+    def test_returns_text_on_success(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        class I:
+            body = type("o", (), {"content": '{"text": "original msg"}'})()
+        class R:
+            def success(self): return True
+            data = type("o", (), {"items": [I()]})()
+        class S:
+            def get(self, req): return R()
+        client._client = type("obj", (object,), {
+            "im": type("obj", (object,), {
+                "v1": type("obj", (object,), {"message": S()})(),
+            })(),
+        })()
+        assert client._fetch_quoted_message("p1") == "original msg"
+
+    def test_returns_empty_on_failure(self) -> None:
+        client = FeishuClient(app_id="t", app_secret="t")
+        class R:
+            def success(self): return False
+        class S:
+            def get(self, req): return R()
+        client._client = type("obj", (object,), {
+            "im": type("obj", (object,), {
+                "v1": type("obj", (object,), {"message": S()})(),
+            })(),
+        })()
+        assert client._fetch_quoted_message("p1") == ""
+
+
+class TestOnMessageWrapperEdgeCases:
+    def test_duplicate_message_id_skipped(self) -> None:
+        captured = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_message=lambda *a: captured.append(a))
+        client._check_duplicate = lambda _: True  # type: ignore
+        class _M: pass
+        d = type("o", (), {"event": type("o", (), {
+            "message": type("o", (), {"message_id": "dup"})(),
+            "sender": type("o", (), {"sender_id": type("o", (), {"open_id": "o"})()}),
+        })()})()
+        client._on_message_wrapper(d)
+        assert captured == []
+
+    def test_missing_message_id_returns_early(self) -> None:
+        captured = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_message=lambda *a: captured.append(a))
+        class _M: pass
+        d = type("o", (), {"event": type("o", (), {
+            "message": type("o", (), {"message_id": None})(),
+            "sender": type("o", (), {"sender_id": type("o", (), {"open_id": "o"})()}),
+        })()})()
+        client._on_message_wrapper(d)
+        assert captured == []
+
+    def test_quoted_message_appended(self) -> None:
+        captured = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_message=lambda s, c, t, m: captured.append(t))
+        client._check_duplicate = lambda _: False  # type: ignore
+        client._add_reaction = lambda *a: None  # type: ignore
+        client._fetch_quoted_message = lambda m: "quoted text"  # type: ignore
+        d = type("o", (), {"event": type("o", (), {
+            "message": type("o", (), {
+                "message_id": "mq", "content": '{"text": "reply"}',
+                "chat_id": "c1", "parent_id": "p123",
+            })(),
+            "sender": type("o", (), {"sender_id": type("o", (), {"open_id": "o"})()}),
+        })()})()
+        client._on_message_wrapper(d)
+        assert len(captured) == 1
+        assert "[引用]quoted text" in captured[0]
+
+    def test_no_sender_open_id_falls_back(self) -> None:
+        captured = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_message=lambda *a: captured.append(a))
+        client._check_duplicate = lambda _: False  # type: ignore
+        client._add_reaction = lambda *a: None  # type: ignore
+        d = type("o", (), {"event": type("o", (), {
+            "message": type("o", (), {
+                "message_id": "mn", "content": '{"text": "hi"}',
+                "chat_id": "c1", "parent_id": None,
+            })(),
+            "sender": type("o", (), {"sender_id": None})(),
+        })()})()
+        client._on_message_wrapper(d)
+        assert captured[0][0] == ""  # sender_id empty fallback
+
+    def test_image_download_failure_text(self) -> None:
+        captured = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_message=lambda s, c, t, m: captured.append(t))
+        client._check_duplicate = lambda _: False  # type: ignore
+        client._add_reaction = lambda *a: None  # type: ignore
+        client._download_image = lambda m, k: ""  # type: ignore
+        d = type("o", (), {"event": type("o", (), {
+            "message": type("o", (), {
+                "message_id": "mi", "content": '{"image_key": "img_x"}',
+                "chat_id": "c1", "parent_id": None,
+            })(),
+            "sender": type("o", (), {"sender_id": type("o", (), {"open_id": "o"})()}),
+        })()})()
+        client._on_message_wrapper(d)
+        assert "下载失败" in captured[0]
+
+    def test_content_not_dict_uses_str(self) -> None:
+        captured = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_message=lambda s, c, t, m: captured.append(t))
+        client._check_duplicate = lambda _: False  # type: ignore
+        client._add_reaction = lambda *a: None  # type: ignore
+        d = type("o", (), {"event": type("o", (), {
+            "message": type("o", (), {
+                "message_id": "ms", "content": '"just a string"',
+                "chat_id": "c1", "parent_id": None,
+            })(),
+            "sender": type("o", (), {"sender_id": type("o", (), {"open_id": "o"})()}),
+        })()})()
+        client._on_message_wrapper(d)
+        assert captured[0] == "just a string"
