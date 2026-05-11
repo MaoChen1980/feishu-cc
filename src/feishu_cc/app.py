@@ -458,12 +458,7 @@ class FeishuCCApp:
                 "`/help` — 显示此帮助\n"
                 "`/tool` — 开启/关闭工具调用消息推送\n"
                 "`/think` — 开启/关闭思考过程推送\n"
-                "`/workspace <path>` — 切换 Claude 工作目录\n\n"
-                "**功能特性**\n"
-                "• 快速按钮 — 回复中的 `---quick-replies` 可生成一键按钮\n"
-                "• 文件消息 — 支持下载并转发文件给 Claude\n"
-                "• 富文本卡片 — 自动选择最佳消息格式展示\n"
-                "• 会话持久化 — 重启后自动恢复会话\n"
+                "`/workspace <path>` — 切换 Claude 工作目录\n"
             )
             feishu.send_reply(chat_id, message_id, help_text)
             return

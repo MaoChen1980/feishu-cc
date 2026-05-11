@@ -303,7 +303,7 @@ class ClaudeBridge:
             "--output-format", "stream-json",
             "--input-format", "stream-json",
             "--permission-prompt-tool", "stdio",
-            "--permission-mode", "bypass",
+            "--permission-mode", "bypassPermissions",
             "--append-system-prompt", self._system_prompt,
         ]
         if resume_id:
