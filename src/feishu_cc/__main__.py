@@ -9,11 +9,42 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import atexit
+import os
 import sys
 
 from loguru import logger
 
 from feishu_cc.config import CONFIG_DIR
+
+PID_FILE = CONFIG_DIR / "feishu-cc.pid"
+
+
+def _check_pid() -> None:
+    """Ensure only one feishu-cc instance runs via PID file."""
+    current_pid = os.getpid()
+
+    if PID_FILE.exists():
+        try:
+            old_pid = int(PID_FILE.read_text().strip())
+        except (ValueError, OSError):
+            old_pid = None
+
+        if old_pid and old_pid != current_pid:
+            try:
+                os.kill(old_pid, 0)  # signal 0 = probe alive
+            except PermissionError:
+                pass  # process exists but owned by another user
+            except OSError:
+                pass  # process not found — stale PID
+            else:
+                logger.error("Another instance (PID {}) is already running, exiting.", old_pid)
+                sys.exit(1)
+
+    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(current_pid))
+    atexit.register(lambda: PID_FILE.unlink(missing_ok=True))
+    logger.debug("PID {} written to {}", current_pid, PID_FILE)
 
 
 def main() -> None:
@@ -41,6 +72,8 @@ def main() -> None:
         retention=30,
         encoding="utf-8",
     )
+
+    _check_pid()
 
     from feishu_cc.app import FeishuCCApp
 

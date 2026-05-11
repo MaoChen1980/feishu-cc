@@ -242,7 +242,7 @@ class FeishuCCApp:
                 done_emoji=self._config.done_emoji,
                 on_message=lambda s, c, t, mid: (
                     self._set_chat(current_chat, c),
-                    self._on_message(bot_cfg.name, bridge, feishu, c, t, mid),
+                    self._on_message(bot_cfg.name, bridge, feishu, c, t, mid, s),
                 ),
                 on_card_action=lambda r, c, s: self._on_card_action(bot_cfg.name, bridge, feishu, c, r, s),
             )
@@ -288,11 +288,7 @@ class FeishuCCApp:
                     pass
             raise
 
-        # Self-heal detected code changes → restart
-        logger.info("Self-heal: changes applied, restarting...")
-        for rt in reversed(self._bots):
-            rt.stop_loop()
-        self._restart_app()
+        return
 
     # -- helpers -------------------------------------------------------------
 
@@ -396,9 +392,9 @@ class FeishuCCApp:
     # -- message routing -----------------------------------------------------
 
     def _on_message(self, bot_name: str, bridge: ClaudeBridge, feishu: FeishuClient,
-                    chat_id: str, text: str, message_id: str) -> None:
+                    chat_id: str, text: str, message_id: str, sender_id: str = "") -> None:
         """Handle incoming Feishu message → send to Claude → reply."""
-        logger.info("[{}] Message from {}: {}", bot_name, chat_id, text[:80])
+        logger.info("[{}] Message from {} (sender={}): {}", bot_name, chat_id, sender_id, text[:80])
 
         # Save chat_id for proactive startup notification next time
         self._save_last_chat(bot_name, chat_id)
@@ -424,6 +420,7 @@ class FeishuCCApp:
             return
 
         if text.strip() == "/restart":
+            logger.warning("[{}] /restart command from sender={} chat={} mid={}", bot_name, sender_id, chat_id, message_id)
             feishu.send_reply(chat_id, message_id, "🔄 feishu-cc 重启中...")
             self._restart_app()
             return
@@ -490,21 +487,36 @@ class FeishuCCApp:
             return
 
         # Normal card reply → forward to Claude as user message
-        self._on_message(bot_name, bridge, feishu, chat_id, reply_text, "")
+        self._on_message(bot_name, bridge, feishu, chat_id, reply_text, "", sender_id)
 
     def _restart_app(self) -> None:
-        """Restart the entire feishu-cc process via os.execv."""
+        """Restart feishu-cc: exit first, spawn helper, which starts new process after a delay."""
         logger.info("Restarting feishu-cc...")
         for rt in reversed(self._bots):
             try:
                 rt.stop_loop()
             except Exception:
                 logger.exception("[{}] Error stopping bot during restart", rt.name)
-        try:
-            os.execv(sys.executable, [sys.executable, "-m", "feishu_cc"] + self._restart_args[1:])
-        except OSError:
-            logger.exception("Failed to exec, falling back to exit")
-            os._exit(1)
+
+        # Remove PID file so new instance starts clean
+        (CONFIG_DIR / "feishu-cc.pid").unlink(missing_ok=True)
+
+        # Spawn a detached helper: wait 2s for this process to fully exit,
+        # then launch a fresh feishu-cc that reads the latest code from disk.
+        import json
+        import subprocess
+
+        restart_args = json.dumps(
+            [sys.executable, "-m", "feishu_cc"] + self._restart_args[1:]
+        )
+        helper = (
+            "import time, subprocess, json\n"
+            f"_args = {restart_args}\n"
+            "time.sleep(2)\n"
+            "subprocess.run(_args)\n"
+        )
+        subprocess.Popen([sys.executable, "-c", helper])
+        os._exit(0)
 
     def _on_permission(self, feishu: FeishuClient, bot_name: str,
                        prompt: str, value: dict, request_id: str, chat_id: Optional[str]) -> None:
@@ -608,8 +620,9 @@ class FeishuCCApp:
         has_changes_after = self._check_git_diff(project_root)
 
         if has_changes_after and not has_changes_before:
-            logger.info("[self-heal] Code changes detected, requesting restart")
-            self._restart_requested.set()
+            logger.info("[self-heal] Code changes detected — user should /restart to apply")
+            if saved_chat:
+                feishu.send_text(saved_chat, "🔧 自愈已修改代码，使用 /restart 使改动生效")
 
     def _advance_to_current_version(self, log_file: Path) -> None:
         """Advance scan position past errors from old code versions."""
