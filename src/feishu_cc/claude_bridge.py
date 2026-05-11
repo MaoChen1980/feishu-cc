@@ -282,21 +282,40 @@ class ClaudeBridge:
 
             # Pipe closed → process exited
             self._alive = False
+            rc = self._proc.poll() if self._proc else None
+            logger.warning(
+                "[{}] Claude stdout pipe closed (pid={}, returncode={})",
+                self._bot_name, self._proc.pid if self._proc else "?", rc
+            )
+
+            # Give the stderr drain thread a moment to finish reading
+            # before we snapshot the buffer.  Without this, _tail_stderr()
+            # often returns "(no stderr)" because the stderr thread hasn't
+            # flushed its last reads yet.
+            time.sleep(0.05)
+
+            # Suppress duplicate ERROR when a crash handler is already
+            # running.  This happens when _handle_crash restarts Claude
+            # and the new process immediately dies before establishing
+            # a session — the new process's own drain thread would
+            # otherwise log a misleading ERROR that looks like two
+            # independent crashes.
+            if self._crash_handling:
+                logger.debug("[{}] Skipping redundant crash ERROR (handler in progress)", self._bot_name)
+                return
+
+            stderr = self._tail_stderr()
+            logger.error(
+                "[{}] Claude process {} (pid={}, returncode={}). Stderr:\n{}",
+                self._bot_name,
+                "died during initialization" if not self._ready.is_set() else "crashed during operation",
+                self._proc.pid if self._proc else "?", rc, stderr,
+            )
             if not self._ready.is_set():
-                stderr = self._tail_stderr()
-                logger.error(
-                    "[{}] Claude process died during initialization. Stderr:\n{}",
-                    self._bot_name, stderr
-                )
                 asyncio.run_coroutine_threadsafe(
                     self._handle_init_failure(), self._loop
                 )
             else:
-                stderr = self._tail_stderr()
-                logger.error(
-                    "[{}] Claude process crashed. Auto-restarting. Stderr:\n{}",
-                    self._bot_name, stderr
-                )
                 asyncio.run_coroutine_threadsafe(
                     self._handle_crash(), self._loop
                 )
@@ -343,8 +362,9 @@ class ClaudeBridge:
 
             n = len(self._crash_times)
             if n > 3:
-                logger.error("[{}] Claude crashed {} times in 60s, giving up",
-                             self._bot_name, n)
+                rc = self._proc.poll() if self._proc else None
+                logger.error("[{}] Claude crashed {} times in 60s, giving up (pid={}, returncode={})",
+                             self._bot_name, n, self._proc.pid if self._proc else "?", rc)
                 self._alive = False
                 return
 
@@ -364,9 +384,18 @@ class ClaudeBridge:
                 await self.start()
                 await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
             except Exception:
-                logger.exception("[{}] Claude restart attempt {} failed",
-                                 self._bot_name, n)
+                logger.exception("[{}] Claude restart attempt {} failed, stderr:\n{}",
+                                 self._bot_name, n, self._tail_stderr())
                 raise
+
+            if self._init_failed:
+                # _ready was set by _handle_init_failure, not by a successful
+                # session establishment — the new process crashed before
+                # sending a session event.  Don't log "auto-restarted".
+                logger.warning("[{}] Claude restart attempt {} init failed (process died), stderr:\n{}",
+                               self._bot_name, n, self._tail_stderr())
+                self._init_failed = False
+                return
 
             logger.info("[{}] Claude process auto-restarted", self._bot_name)
         finally:
@@ -379,6 +408,9 @@ class ClaudeBridge:
         if proc is None or proc.returncode is not None:
             return
 
+        pid = proc.pid
+        logger.info("[{}] Stopping Claude subprocess (pid={})", self._bot_name, pid)
+
         try:
             proc.stdin.close()
         except OSError:
@@ -387,9 +419,15 @@ class ClaudeBridge:
         try:
             proc.terminate()
             proc.wait(timeout=5)
+            logger.info("[{}] Claude subprocess terminated (pid={}, returncode={})",
+                        self._bot_name, pid, proc.returncode)
         except subprocess.TimeoutExpired:
+            logger.warning("[{}] Claude subprocess did not terminate in time, killing (pid={})",
+                          self._bot_name, pid)
             proc.kill()
             proc.wait(timeout=5)
+            logger.info("[{}] Claude subprocess killed (pid={}, returncode={})",
+                        self._bot_name, pid, proc.returncode)
         except OSError:
             pass  # Already dead / access denied
 
@@ -408,6 +446,20 @@ class ClaudeBridge:
 
             # Recover from init failure (stale session, crashed process, etc.)
             if self._init_failed or not self._alive:
+                # If a crash handler is already running, wait for it to finish
+                # instead of racing to start a new process.  Without this wait,
+                # send_message recovery starts a process that the in-flight
+                # _handle_crash will kill or that inherits a stale session file,
+                # causing it to crash immediately — flooding the log with paired
+                # ERROR entries.
+                for _ in range(50):
+                    if not self._crash_handling:
+                        break
+                    await asyncio.sleep(0.1)
+                else:
+                    logger.warning("[{}] Crash handler still busy after 5s, recovering anyway",
+                                   self._bot_name)
+
                 logger.info("[{}] Recovering Claude process...", self._bot_name)
                 if self._session_file.exists():
                     self._session_file.unlink()
@@ -595,7 +647,11 @@ class ClaudeBridge:
                             logger.exception("[{}] on_tool_result callback failed", self._bot_name)
 
         elif event_type == "user":
-            logger.debug("[{}] User event: {}", self._bot_name, event.get("message", {}).get("content", ""))
+            content = event.get("message", {}).get("content", "")
+            # Truncate to avoid logging entire file contents from tool_results
+            content_str = str(content) if not isinstance(content, str) else content
+            logger.debug("[{}] User event: {}... ({} chars)",
+                         self._bot_name, content_str[:200], len(content_str))
 
         elif event_type == "error":
             err = event.get("error", {})

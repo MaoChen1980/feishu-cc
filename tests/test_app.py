@@ -66,7 +66,12 @@ class TestBotRuntime:
 
     def test_schedule_does_not_block(self) -> None:
         """schedule is fire-and-forget, returns immediately."""
+        from unittest.mock import AsyncMock
+
         rt = _make_runtime()
+        # Mock bridge.start() to avoid spawning a real subprocess
+        rt.bridge.start = AsyncMock()
+        rt.bridge._ready.set()
         rt.start_loop()
 
         async def dummy():
@@ -80,6 +85,9 @@ class TestBotRuntime:
         from unittest.mock import AsyncMock
 
         rt = _make_runtime()
+        # Mock bridge.start() to avoid spawning a real subprocess during start_loop
+        rt.bridge.start = AsyncMock()
+        rt.bridge._ready.set()
         rt.start_loop()
 
         # Create a fake session file on disk
