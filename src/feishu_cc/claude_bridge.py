@@ -198,6 +198,11 @@ class ClaudeBridge:
         # Reader threads
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
+
+        # Flags set externally by FeishuCCApp for runtime control
+        self._show_tool_calls = False
+        self._show_thinking = False
+        self._pending_startup_info = False
     # -- lifecycle -----------------------------------------------------------
 
     @property

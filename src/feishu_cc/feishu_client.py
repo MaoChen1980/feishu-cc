@@ -131,6 +131,15 @@ class FeishuClient:
                 else:
                     logger.warning("Image download returned empty, check previous warning for details")
                     text = "用户发送了一张图片，但下载失败"
+            elif content_obj.get("file_key"):
+                file_key = content_obj["file_key"]
+                logger.info("Detected file with key: {}", file_key)
+                local_path = self._download_file(message_id, file_key)
+                if local_path:
+                    text = f"用户发送了一个文件，文件路径：{local_path}"
+                else:
+                    logger.warning("File download returned empty")
+                    text = "用户发送了一个文件，但下载失败"
             else:
                 text = content_obj.get("text", "")
         else:
@@ -243,6 +252,35 @@ class FeishuClient:
         with open(path, "wb") as f:
             f.write(data)
         logger.info("Image {} saved to {} ({}b, {})", image_key, path, len(data), ext)
+        return str(path)
+
+    def _download_file(self, message_id: str, file_key: str) -> str:
+        """Download a file from a Feishu message resource, save to temp dir."""
+        from lark_oapi.api.im.v1 import GetMessageResourceRequest
+
+        request = GetMessageResourceRequest.builder() \
+            .message_id(message_id) \
+            .file_key(file_key) \
+            .type("file") \
+            .build()
+        try:
+            response = self._http_retry(lambda: self._client.im.v1.message_resource.get(request))
+        except RequestException:
+            logger.exception("Failed to download file {}", file_key)
+            return ""
+        if response.code != 0 or not response.file:
+            status = response.raw.status_code if response.raw else "N/A"
+            logger.warning("Failed to download file {}: code={}, msg={}, http_status={}",
+                           file_key, response.code, response.msg, status)
+            return ""
+
+        data = response.file.read()
+        temp_dir = CONFIG_DIR / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        path = temp_dir / file_key
+        with open(path, "wb") as f:
+            f.write(data)
+        logger.info("File {} saved to {} ({}b)", file_key, path, len(data))
         return str(path)
 
     # -- fetch quoted message ------------------------------------------------

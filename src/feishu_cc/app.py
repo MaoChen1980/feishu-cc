@@ -648,7 +648,7 @@ class FeishuCCApp:
         if has_changes_after and not has_changes_before:
             logger.info("[self-heal] Code changes detected — user should restart feishu-cc to apply")
             if saved_chat:
-                feishu.send_text(saved_chat, "🔧 自愈已修改代码，请手动重启 feishu-cc 使改动生效")
+                rt.feishu.send_text(saved_chat, "🔧 自愈已修改代码，请手动重启 feishu-cc 使改动生效")
 
     def _advance_to_current_version(self, log_file: Path) -> None:
         """Advance scan position past errors from old code versions."""

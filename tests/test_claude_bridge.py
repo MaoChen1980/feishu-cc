@@ -425,7 +425,7 @@ class TestCrashHandling:
         bridge._ready.set()  # So start()._ready.wait() returns immediately
         bridge._session_id = None
         bridge.stop = AsyncMock()
-        bridge.start = AsyncMock()
+        bridge.start = AsyncMock(side_effect=lambda: bridge._ready.set())
 
         with patch("asyncio.sleep", AsyncMock()):
             asyncio.run(bridge._handle_crash())
@@ -441,7 +441,7 @@ class TestCrashHandling:
         bridge._crash_times = []
         bridge._ready.set()
         bridge.stop = AsyncMock()
-        bridge.start = AsyncMock()
+        bridge.start = AsyncMock(side_effect=lambda: bridge._ready.set())
 
         assert not bridge._crash_handling
         with patch("asyncio.sleep", AsyncMock()):
@@ -468,7 +468,7 @@ class TestCrashHandling:
         bridge._crash_times = []
         bridge._ready.set()
         bridge.stop = AsyncMock()
-        bridge.start = AsyncMock()
+        bridge.start = AsyncMock(side_effect=lambda: bridge._ready.set())
 
         bridge._response_done.clear()
         with patch("asyncio.sleep", AsyncMock()):
@@ -483,7 +483,7 @@ class TestCrashHandling:
         bridge = _make_bridge()
         bridge._ready.set()
         bridge.stop = AsyncMock()
-        bridge.start = AsyncMock()
+        bridge.start = AsyncMock(side_effect=lambda: bridge._ready.set())
 
         now = time.monotonic()
         # 3 entries: 2 old (>60s), 1 recent
@@ -503,7 +503,7 @@ class TestCrashHandling:
         bridge = _make_bridge()
         bridge._ready.set()
         bridge.stop = AsyncMock()
-        bridge.start = AsyncMock()
+        bridge.start = AsyncMock(side_effect=lambda: bridge._ready.set())
 
         # First crash: n=1, backoff=2
         with patch("asyncio.sleep", AsyncMock()) as mock_sleep:
