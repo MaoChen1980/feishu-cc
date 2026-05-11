@@ -551,6 +551,9 @@ class FeishuCCApp:
         if self._heal_state is None or self._heal_state.path != log_path_str:
             self._heal_state = _SelfHealState.load(log_path_str)
 
+        # Only scan errors from the current git version — skip old sessions
+        self._advance_to_current_version(log_file)
+
         error_lines = self._heal_state.get_new_errors()
         self._heal_state.save()
 
@@ -607,6 +610,54 @@ class FeishuCCApp:
         if has_changes_after and not has_changes_before:
             logger.info("[self-heal] Code changes detected, requesting restart")
             self._restart_requested.set()
+
+    def _advance_to_current_version(self, log_file: Path) -> None:
+        """Advance scan position past errors from old code versions."""
+        if not self._heal_state:
+            return
+        current_ver = _git_version()
+        if not current_ver:
+            return  # No version info, scan everything
+
+        try:
+            text = log_file.read_text("utf-8", errors="replace")
+        except OSError:
+            return
+
+        # Find last "feishu-cc version:" line, get its byte position,
+        # and skip ahead if it belongs to a different version
+        version_prefix = "feishu-cc version: "
+        last_pos = -1
+        last_line_end = 0
+        scan_pos = 0
+
+        for raw_line in text.splitlines(keepends=True):
+            stripped = raw_line.strip()
+            idx = stripped.find(version_prefix)
+            if idx != -1:
+                ver = stripped[idx + len(version_prefix):]
+                last_pos = scan_pos
+                last_line_end = scan_pos + len(raw_line)
+            scan_pos += len(raw_line)
+
+        if last_pos == -1:
+            return  # No version line found, scan everything
+
+        # Read the version at last_pos
+        ver_line = text[last_pos:last_line_end].strip()
+        idx = ver_line.find(version_prefix)
+        logged_ver = ver_line[idx + len(version_prefix):]
+
+        if logged_ver == current_ver:
+            # Same version — start from its first occurrence
+            if self._heal_state.position < last_pos:
+                logger.debug("[self-heal] Advancing past old-version log entries")
+                self._heal_state.position = last_pos
+        else:
+            # Different version — skip everything (errors belong to old code)
+            logger.debug("[self-heal] Log version {} != current {}, skipping",
+                         logged_ver, current_ver)
+            self._heal_state.position = log_file.stat().st_size
 
     @staticmethod
     def _check_git_diff(project_root: str) -> bool:
