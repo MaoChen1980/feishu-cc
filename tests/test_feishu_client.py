@@ -371,11 +371,8 @@ class TestOnCardActionWrapper:
     def _data(self, *, qr="confirm", cid="chat_1", open_id="open_1", action_name="btn_1"):
         class _M:
             pass
-        val = _M()
-        val.qr = qr
-        val.cid = cid
         act = _M()
-        act.value = val
+        act.value = {"qr": qr, "cid": cid}
         act.name = action_name
         op = _M()
         op.open_id = open_id
@@ -543,12 +540,12 @@ class TestSendImplementations:
     """_send_card, _send_post_reply, send_plain_text — low-level send via SDK."""
 
     def _mock_client(self, client, success: bool):
-        class R:
-            code = 0 if success else 999
-            msg = "" if success else "fail"
-            def success(self): return success
+        def _make_resp():
+            if success:
+                return type("R", (), {"code": 0, "msg": "", "success": lambda self: True})()
+            return type("R", (), {"code": 999, "msg": "fail", "success": lambda self: False})()
         class S:
-            def create(self, req): return R()
+            def create(self, req): return _make_resp()
         client._client = type("obj", (object,), {
             "im": type("obj", (object,), {
                 "v1": type("obj", (object,), {"message": S()})(),
