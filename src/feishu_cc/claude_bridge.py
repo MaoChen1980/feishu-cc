@@ -99,12 +99,46 @@ DEFAULT_SYSTEM_PROMPT = """\
 ```
 
 不要截断你的回复，用户需要看到完整内容。
-表格使用 markdown 格式即可。\
+表格使用 markdown 格式即可。
+
+## 工作流程
+
+你的工作流程是：先探索，再规划，最后编码。
+
+### 禁止使用 Plan Mode
+永远不要使用 EnterPlanMode / ExitPlanMode 工具。你已经在 Plan Mode 之外工作，无需进入。
+
+### 写计划书
+在执行任何编码之前，先写一份简短的计划书，包含：
+- 你要做什么
+- 涉及的文件
+- 实现步骤
+
+### 用 quick-replies 让用户批准
+计划书写完后，用 `---quick-replies` 提供「批准执行」和「拒绝/修改」按钮。
+
+示例：
+```
+计划如下：
+1. 修改 claude_bridge.py 添加 XX 功能
+2. 更新测试文件
+3. 运行测试验证
+
+是否执行？
+---quick-replies
+批准执行||approve_plan
+需要修改||reject_plan
+```
+
+用户批准后，再开始编码。\
 """
 
 _STDERR_TAIL_LINES = 80
 _INIT_TIMEOUT = 45.0
-_RESPONSE_TIMEOUT = 300.0
+# Idle timeout: if Claude produces no events (text, tool_use, etc.) for this long,
+# send_message treats it as a timeout.  This is NOT a wall-clock limit — active
+# conversations that keep producing events won't hit it.
+_IDLE_TIMEOUT = 1800.0
 
 
 class ClaudeBridge:
@@ -170,11 +204,6 @@ class ClaudeBridge:
 
         # Init failure flag: process died before _ready was set
         self._init_failed = False
-
-        # Crash tracking: time-window-based (60s) to break infinite restart loops
-        # when Claude keeps crashing immediately after restart.  Unlike a simple
-        # counter, the window prevents premature reset across rapid crashes.
-        self._crash_times: list[float] = []
 
         # Guard: prevent concurrent _handle_crash invocations from old drain threads
         self._crash_handling = False
@@ -274,6 +303,7 @@ class ClaudeBridge:
             "--output-format", "stream-json",
             "--input-format", "stream-json",
             "--permission-prompt-tool", "stdio",
+            "--permission-mode", "bypass",
             "--append-system-prompt", self._system_prompt,
         ]
         if resume_id:
@@ -320,12 +350,9 @@ class ClaudeBridge:
             # flushed its last reads yet.
             time.sleep(0.05)
 
-            # Suppress duplicate ERROR when a crash handler is already
-            # running.  This happens when _handle_crash restarts Claude
-            # and the new process immediately dies before establishing
-            # a session — the new process's own drain thread would
-            # otherwise log a misleading ERROR that looks like two
-            # independent crashes.
+            # Suppress duplicate crash handling when a handler is already
+            # running.  The drain thread from an already-dead process may
+            # still fire after _handle_crash starts.
             if self._crash_handling:
                 logger.debug("[{}] Skipping redundant crash ERROR (handler in progress)", self._bot_name)
                 # Still unblock parent crash handler if new process died
@@ -374,11 +401,15 @@ class ClaudeBridge:
         if self._session_file.exists():
             logger.warning("[{}] Removing stale session file: {}", self._bot_name, self._session_file)
             self._session_file.unlink()
-        self._init_failed = True
-        self._ready.set()
+        # Only flag as init failure if the process is still down — a
+        # concurrent _handle_crash may have already spawned a new process
+        # that's alive and well.
+        if not self._alive:
+            self._init_failed = True
+            self._ready.set()
 
     async def _handle_crash(self) -> None:
-        """Process died during normal operation — retry with backoff."""
+        """Process died during normal operation — mark bridge as dead."""
         if self._crash_handling:
             logger.debug("[{}] Crash handler already running, skipping", self._bot_name)
             return
@@ -392,65 +423,10 @@ class ClaudeBridge:
             self._response_gen += 1
             self._response_done.set()
 
-            # Time-window crash counting: only crashes within the last 60s
-            # count toward the limit, preventing indefinite restart loops when
-            # the process keeps dying immediately after restart.
-            now = time.monotonic()
-            self._crash_times = [t for t in self._crash_times if now - t < 60]
-            self._crash_times.append(now)
-
-            n = len(self._crash_times)
-            if n > 3:
-                rc = self._proc.poll() if self._proc else None
-                logger.error("[{}] Claude crashed {} times in 60s, giving up (pid={}, returncode={})",
-                             self._bot_name, n, self._proc.pid if self._proc else "?", rc)
-                self._alive = False
-                return
-
-            backoff = min(2 ** n, 30)
-            logger.info("[{}] Auto-restarting Claude (attempt {}) in {}s...",
-                         self._bot_name, n, backoff)
-
-            # Ensure old process is fully dead before spawning a new one
-            await self.stop()
-
-            if self._session_file.exists():
-                self._session_file.unlink()
-            self._session_id = None
-
-            await asyncio.sleep(backoff)
-
-            # Retry restart up to 3 times within this crash-handler call.
-            # Transient failures (stale session, rapid crash after spawn)
-            # are recovered immediately instead of forcing send_message
-            # recovery path (which adds 45s+ delay).
-            for retry in range(3):
-                self._init_failed = False
-                self._ready.clear()
-                await self.start()
-
-                try:
-                    await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
-                except (asyncio.TimeoutError, ConnectionError):
-                    await self.stop()
-                    logger.warning("[{}] Restart attempt {}.{} failed (timeout), retrying in {}s",
-                                   self._bot_name, n, retry + 1, backoff)
-                    await asyncio.sleep(backoff)
-                    continue
-
-                if self._init_failed:
-                    logger.warning("[{}] Restart attempt {}.{} init failed (process died), retrying in {}s",
-                                   self._bot_name, n, retry + 1, backoff)
-                    self._init_failed = False
-                    await self.stop()
-                    await asyncio.sleep(backoff)
-                    continue
-
-                logger.info("[{}] Claude process auto-restarted", self._bot_name)
-                return
-
-            logger.error("[{}] Claude restart attempt {} failed after 3 retries",
-                         self._bot_name, n)
+            self._alive = False
+            rc = self._proc.poll() if self._proc else None
+            logger.error("[{}] Claude process crashed (pid={}, returncode={})",
+                         self._bot_name, self._proc.pid if self._proc else "?", rc)
         finally:
             self._crash_handling = False
 
@@ -486,7 +462,7 @@ class ClaudeBridge:
 
     # -- send ----------------------------------------------------------------
 
-    async def send_message(self, text: str, timeout: float = _RESPONSE_TIMEOUT) -> str:
+    async def send_message(self, text: str, timeout: float = _IDLE_TIMEOUT) -> str:
         """Send a user message to Claude and wait for the complete response."""
         async with self._send_lock:
             if not self._ready.is_set():
@@ -499,9 +475,9 @@ class ClaudeBridge:
 
             # Recover from init failure (stale session, crashed process, etc.)
             if self._init_failed or not self._alive:
-                logger.info("[{}] Claude down _init_failed={} _alive={} _crash_handling={} crash_count={}",
+                logger.info("[{}] Claude down _init_failed={} _alive={} _crash_handling={}",
                             self._bot_name, self._init_failed, self._alive,
-                            self._crash_handling, len(self._crash_times))
+                            self._crash_handling)
 
                 # If a crash handler is already running, wait for it to finish
                 # instead of racing to start a new process.  Without this wait,
@@ -517,11 +493,12 @@ class ClaudeBridge:
                     logger.warning("[{}] Crash handler still busy after 5s, recovering anyway",
                                    self._bot_name)
 
-                # Crash handler may have already restarted Claude by now — re-check
-                # before starting a second process.
+                # Claude may have recovered by the time send_message
+                # acquires the lock — re-check before starting a new process.
                 if self._alive and self._ready.is_set():
-                    logger.info("[{}] Crash handler already recovered Claude (crash_count={})",
-                                self._bot_name, len(self._crash_times))
+                    self._init_failed = False
+                    logger.info("[{}] Claude already alive and ready after crash",
+                                self._bot_name)
                 else:
                     logger.info("[{}] Recovering Claude process...", self._bot_name)
                     if self._session_file.exists():

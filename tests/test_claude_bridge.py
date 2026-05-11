@@ -399,62 +399,44 @@ class TestCrashHandling:
         """When _crash_handling=True, _handle_crash returns immediately."""
         bridge = _make_bridge()
         bridge._crash_handling = True
+        bridge._alive = True
         asyncio.run(bridge._handle_crash())
-        # Should not have touched crash tracking
-        assert bridge._crash_times == []
+        # Should not set _alive = False (skipped due to guard)
+        assert bridge._alive
 
     def test_crash_gives_up_after_limit(self) -> None:
-        """4+ crashes within 60s causes _handle_crash to give up (_alive=False)."""
-        import time
-
+        """_handle_crash always sets _alive=False (no restart logic)."""
         bridge = _make_bridge()
-        now = time.monotonic()
-        bridge._crash_times = [now - 10, now - 20, now - 30, now - 40]  # 4 in 60s
         bridge._alive = True
         bridge._crash_handling = False
 
         asyncio.run(bridge._handle_crash())
-        assert not bridge._alive  # gave up
+        assert not bridge._alive
 
-    def test_crash_restarts_below_limit(self) -> None:
-        """<4 crashes within 60s — calls stop() then start()."""
-        from unittest.mock import AsyncMock, patch
-
+    def test_crash_marks_bridge_dead(self) -> None:
+        """_handle_crash sets _alive=False, _response_done, and _response_error."""
         bridge = _make_bridge()
-        bridge._crash_times = []
-        bridge._ready.set()  # So start()._ready.wait() returns immediately
-        bridge._session_id = None
-        bridge.stop = AsyncMock()
-        bridge.start = AsyncMock(side_effect=lambda: bridge._ready.set())
+        bridge._alive = True
+        bridge._response_done.clear()
+        bridge._response_error = None
 
-        with patch("asyncio.sleep", AsyncMock()):
-            asyncio.run(bridge._handle_crash())
+        asyncio.run(bridge._handle_crash())
 
-        bridge.stop.assert_awaited_once()
-        bridge.start.assert_awaited_once()
+        assert not bridge._alive
+        assert bridge._response_done.is_set()
+        assert bridge._response_error is not None
 
     def test_crash_guard_releases_on_success(self) -> None:
         """After _handle_crash succeeds, _crash_handling is False."""
-        from unittest.mock import AsyncMock, patch
-
         bridge = _make_bridge()
-        bridge._crash_times = []
-        bridge._ready.set()
-        bridge.stop = AsyncMock()
-        bridge.start = AsyncMock(side_effect=lambda: bridge._ready.set())
 
         assert not bridge._crash_handling
-        with patch("asyncio.sleep", AsyncMock()):
-            asyncio.run(bridge._handle_crash())
+        asyncio.run(bridge._handle_crash())
         assert not bridge._crash_handling
 
     def test_crash_guard_releases_on_limit(self) -> None:
-        """After _handle_crash gives up due to limit, _crash_handling is False."""
-        import time
-
+        """After _handle_crash gives up, _crash_handling is False."""
         bridge = _make_bridge()
-        now = time.monotonic()
-        bridge._crash_times = [now - 10, now - 20, now - 30, now - 40]
         bridge._alive = True
 
         asyncio.run(bridge._handle_crash())
@@ -462,63 +444,11 @@ class TestCrashHandling:
 
     def test_crash_sets_response_done(self) -> None:
         """_handle_crash sets _response_done to unblock send_message."""
-        from unittest.mock import AsyncMock, patch
-
         bridge = _make_bridge()
-        bridge._crash_times = []
-        bridge._ready.set()
-        bridge.stop = AsyncMock()
-        bridge.start = AsyncMock(side_effect=lambda: bridge._ready.set())
 
         bridge._response_done.clear()
-        with patch("asyncio.sleep", AsyncMock()):
-            asyncio.run(bridge._handle_crash())
+        asyncio.run(bridge._handle_crash())
         assert bridge._response_done.is_set()
-
-    def test_crash_time_window_filters_old_entries(self) -> None:
-        """Crashes older than 60s are not counted in the limit."""
-        import time
-        from unittest.mock import AsyncMock, patch
-
-        bridge = _make_bridge()
-        bridge._ready.set()
-        bridge.stop = AsyncMock()
-        bridge.start = AsyncMock(side_effect=lambda: bridge._ready.set())
-
-        now = time.monotonic()
-        # 3 entries: 2 old (>60s), 1 recent
-        bridge._crash_times = [now - 120, now - 90, now - 5]
-
-        with patch("asyncio.sleep", AsyncMock()):
-            asyncio.run(bridge._handle_crash())
-
-        # After filtering + append: should have 2 entries (now-5 + this one)
-        assert len(bridge._crash_times) == 2
-        assert time.monotonic() - bridge._crash_times[-1] < 1
-
-    def test_crash_backoff_increases(self) -> None:
-        """Backoff should increase with crash count (2s, 4s, 8s)."""
-        from unittest.mock import AsyncMock, patch
-
-        bridge = _make_bridge()
-        bridge._ready.set()
-        bridge.stop = AsyncMock()
-        bridge.start = AsyncMock(side_effect=lambda: bridge._ready.set())
-
-        # First crash: n=1, backoff=2
-        with patch("asyncio.sleep", AsyncMock()) as mock_sleep:
-            asyncio.run(bridge._handle_crash())
-            assert bridge._crash_times[-1] is not None
-
-        # For n=2, we need a crash still in 60s window
-        # Re-setup for n=2 scenario
-        import time
-        now = time.monotonic()
-        bridge._crash_times = [now - 5]  # 1 recent crash
-        bridge._response_done.clear()
-        with patch("asyncio.sleep", AsyncMock()) as mock_sleep:
-            asyncio.run(bridge._handle_crash())
-            assert bridge._crash_times[-1] is not None
 
 
 class TestHandleInitFailure:

@@ -14,7 +14,7 @@ from typing import Any, Optional, Union
 
 from loguru import logger
 
-from feishu_cc.claude_bridge import ClaudeBridge, _RESPONSE_TIMEOUT
+from feishu_cc.claude_bridge import ClaudeBridge, _IDLE_TIMEOUT
 from feishu_cc.config import CONFIG_DIR, Config
 from feishu_cc.feishu_client import FeishuClient
 
@@ -480,7 +480,7 @@ class FeishuCCApp:
                     feishu._remove_reaction(message_id)
                 feishu.send_plain_text(chat_id, "✅ 空闲")
             except asyncio.TimeoutError:
-                logger.warning("[{}] Timeout processing message from {} ({}s)", bot_name, chat_id, _RESPONSE_TIMEOUT)
+                logger.warning("[{}] Timeout processing message from {} ({}s)", bot_name, chat_id, _IDLE_TIMEOUT)
                 feishu.send_plain_text(chat_id, "⏰ 处理超时，请重试")
             except ConnectionError:
                 logger.warning("[{}] Connection lost to Claude for {}", bot_name, chat_id)
@@ -501,16 +501,22 @@ class FeishuCCApp:
 
         if reply_text.startswith("__perm_allow_once__:"):
             request_id = reply_text.split(":", 1)[1]
+            feishu.send_plain_text(chat_id, "你已选择：允许本次操作（仅一次）")
             rt.schedule(bridge.respond_permission(request_id, "allow_once"))
             return
         if reply_text.startswith("__perm_allow__:"):
             request_id = reply_text.split(":", 1)[1]
+            feishu.send_plain_text(chat_id, "你已选择：允许本次操作（始终允许）")
             rt.schedule(bridge.respond_permission(request_id, "allow_this_time"))
             return
         if reply_text.startswith("__perm_deny__:"):
             request_id = reply_text.split(":", 1)[1]
+            feishu.send_plain_text(chat_id, "你已选择：拒绝本次操作")
             rt.schedule(bridge.respond_permission(request_id, "deny"))
             return
+
+        # Send confirmation that quick reply was received
+        feishu.send_plain_text(chat_id, f"你已回复：{reply_text}")
 
         # Normal card reply → forward to Claude as user message
         self._on_message(bot_name, bridge, feishu, chat_id, reply_text, "", sender_id)
@@ -548,6 +554,8 @@ class FeishuCCApp:
                        prompt: str, value: dict, request_id: str, chat_id: Optional[str]) -> None:
         """Send permission request to Feishu user."""
         logger.info("[{}] Permission requested: {} {}", bot_name, prompt, value)
+        if not chat_id:
+            chat_id = self._load_last_chat(bot_name)
         if chat_id:
             feishu.send_permission_card(chat_id, prompt, request_id, value)
         else:
