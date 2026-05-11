@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -20,12 +21,66 @@ from loguru import logger
 
 from feishu_cc.config import CONFIG_DIR
 
-# Prevent orphan processes on Windows: create a new process group so that
-# Ctrl+C / console close doesn't propagate to the Claude subprocess, and
-# so we can cleanly kill the process group on shutdown.
+# On Windows, create child in its own process group (Ctrl+C isolation) and
+# allow it to break away from any parent job so we can assign it to our own
+# job object for KILL_ON_JOB_CLOSE protection.
 _CREATION_FLAGS = 0
 if os.name == "nt":
-    _CREATION_FLAGS = subprocess.CREATE_NEW_PROCESS_GROUP
+    _CREATION_FLAGS = (
+        subprocess.CREATE_NEW_PROCESS_GROUP
+        | subprocess.CREATE_BREAKAWAY_FROM_JOB
+    )
+
+# Windows Job Object with KILL_ON_JOB_CLOSE: when feishu-cc exits for ANY
+# reason (normal exit, crash, os._exit, segfault), Windows auto-terminates
+# all Claude subprocesses assigned to this job, preventing orphans.
+_WIN32_JOB_HANDLE = None
+if os.name == "nt":
+    import ctypes
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _WIN32_JOB_HANDLE = _kernel32.CreateJobObjectW(None, None)
+    if _WIN32_JOB_HANDLE:
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+
+        class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+                ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+                ("LimitFlags", wintypes.ULONG),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.ULONG),
+                ("Affinity", ctypes.c_size_t),
+                ("ChildProcessRateControlToken", wintypes.ULONG),
+                ("ExtendedFlags", wintypes.ULONG),
+            ]
+
+        class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", ctypes.c_uint64 * 6),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+
+        if not _kernel32.SetInformationJobObject(
+            _WIN32_JOB_HANDLE,
+            9,  # JobObjectExtendedLimitInformation
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        ):
+            _kernel32.CloseHandle(_WIN32_JOB_HANDLE)
+            _WIN32_JOB_HANDLE = None
+            logger.debug("Failed to set KILL_ON_JOB_CLOSE on job object")
+    else:
+        logger.debug("Failed to create job object, child processes may become orphaned")
 
 DEFAULT_SYSTEM_PROMPT = """\
 你通过飞书与用户对话。回复可以使用 `---quick-replies` 提供一键按钮。
@@ -116,9 +171,13 @@ class ClaudeBridge:
         # Init failure flag: process died before _ready was set
         self._init_failed = False
 
-        # Crash retry: limit restart loops with backoff
-        self._crash_count = 0
-        _MAX_CRASH_RETRIES = 3
+        # Crash tracking: time-window-based (60s) to break infinite restart loops
+        # when Claude keeps crashing immediately after restart.  Unlike a simple
+        # counter, the window prevents premature reset across rapid crashes.
+        self._crash_times: list[float] = []
+
+        # Guard: prevent concurrent _handle_crash invocations from old drain threads
+        self._crash_handling = False
 
         # Response generation counter: prevents stale events from
         # prematurely unblocking a subsequent send_message.
@@ -163,9 +222,31 @@ class ClaudeBridge:
             stderr=subprocess.PIPE,
             cwd=self._workspace or os.getcwd(),
             env=env,
+            creationflags=_CREATION_FLAGS,
         )
         self._alive = True
         logger.info("[{}] Claude subprocess started (pid={})", self._bot_name, self._proc.pid)
+
+        # Assign to Windows job object so child auto-terminates on parent
+        # exit (even crash / os._exit).  We OpenProcess with the correct
+        # access rights because the default subprocess handle lacks
+        # PROCESS_SET_QUOTA.
+        if os.name == "nt" and _WIN32_JOB_HANDLE:
+            try:
+                import ctypes
+                _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                PROCESS_SET_QUOTA = 0x0100
+                PROCESS_TERMINATE = 0x0001
+                ph = _k32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, self._proc.pid)
+                if ph:
+                    _k32.AssignProcessToJobObject(_WIN32_JOB_HANDLE, ph)
+                    _k32.CloseHandle(ph)
+                else:
+                    logger.warning("[{}] Could not open handle for pid {} to assign to job",
+                                   self._bot_name, self._proc.pid)
+            except Exception as e:
+                logger.warning("[{}] Failed to assign pid {} to job object: {}",
+                               self._bot_name, self._proc.pid, e)
 
         # Start both reader threads — stdout dispatches to event loop,
         # stderr stays in memory for diagnostics.
@@ -246,39 +327,50 @@ class ClaudeBridge:
 
     async def _handle_crash(self) -> None:
         """Process died during normal operation — retry with backoff."""
-        self._response_done.set()
-
-        self._crash_count += 1
-        if self._crash_count > 3:
-            logger.error("[{}] Claude crashed {} times, giving up", self._bot_name, self._crash_count)
-            self._alive = False
+        if self._crash_handling:
+            logger.debug("[{}] Crash handler already running, skipping", self._bot_name)
             return
-
-        backoff = min(2 ** self._crash_count, 30)
-        logger.info("[{}] Auto-restarting Claude (attempt {}) in {}s...",
-                     self._bot_name, self._crash_count, backoff)
-
-        # Ensure old process is fully dead before spawning a new one
-        await self.stop()
-
-        if self._session_file.exists():
-            self._session_file.unlink()
-        self._session_id = None
-
-        await asyncio.sleep(backoff)
+        self._crash_handling = True
         try:
-            await self.start()
-            await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
-        except Exception:
-            logger.exception("[{}] Claude restart attempt {} failed",
-                             self._bot_name, self._crash_count)
-            # If start itself fails, _handle_crash won't be triggered again
-            # by the reader thread (process never started).  Re-raise so
-            # the reader thread knows to give up.
-            raise
+            self._response_done.set()
 
-        self._crash_count = 0
-        logger.info("[{}] Claude process auto-restarted", self._bot_name)
+            # Time-window crash counting: only crashes within the last 60s
+            # count toward the limit, preventing indefinite restart loops when
+            # the process keeps dying immediately after restart.
+            now = time.monotonic()
+            self._crash_times = [t for t in self._crash_times if now - t < 60]
+            self._crash_times.append(now)
+
+            n = len(self._crash_times)
+            if n > 3:
+                logger.error("[{}] Claude crashed {} times in 60s, giving up",
+                             self._bot_name, n)
+                self._alive = False
+                return
+
+            backoff = min(2 ** n, 30)
+            logger.info("[{}] Auto-restarting Claude (attempt {}) in {}s...",
+                         self._bot_name, n, backoff)
+
+            # Ensure old process is fully dead before spawning a new one
+            await self.stop()
+
+            if self._session_file.exists():
+                self._session_file.unlink()
+            self._session_id = None
+
+            await asyncio.sleep(backoff)
+            try:
+                await self.start()
+                await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
+            except Exception:
+                logger.exception("[{}] Claude restart attempt {} failed",
+                                 self._bot_name, n)
+                raise
+
+            logger.info("[{}] Claude process auto-restarted", self._bot_name)
+        finally:
+            self._crash_handling = False
 
     async def stop(self) -> None:
         """Terminate the Claude subprocess."""

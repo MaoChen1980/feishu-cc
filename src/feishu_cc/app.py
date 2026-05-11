@@ -258,6 +258,14 @@ class FeishuCCApp:
                 rt.stop_loop()
             logger.info("Goodbye.")
             return
+        except Exception:
+            logger.exception("Fatal error, cleaning up subprocesses...")
+            for rt in reversed(self._bots):
+                try:
+                    rt.stop_loop()
+                except Exception:
+                    pass
+            raise
 
         # Self-heal detected code changes → restart
         logger.info("Self-heal: changes applied, restarting...")
