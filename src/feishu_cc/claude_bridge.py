@@ -124,6 +124,9 @@ class ClaudeBridge:
         # prematurely unblocking a subsequent send_message.
         self._response_gen = 0
 
+        # Startup workspace warning: set when configured workspace is missing
+        self._startup_ws_warning: str | None = None
+
         # Reader threads
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -140,6 +143,15 @@ class ClaudeBridge:
         self._loop = asyncio.get_running_loop()
         self._ready.clear()
         self._response_done.clear()
+
+        # Validate workspace — fallback to cwd if configured dir doesn't exist
+        self._startup_ws_warning = None
+        if self._workspace and not os.path.isdir(self._workspace):
+            bad_ws = self._workspace
+            self._workspace = os.getcwd()
+            self._startup_ws_warning = bad_ws
+            logger.warning("[{}] Workspace '{}' not found, falling back to '{}'",
+                           self._bot_name, bad_ws, self._workspace)
 
         args = self._build_args(resume_id)
 

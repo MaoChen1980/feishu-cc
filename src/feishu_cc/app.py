@@ -79,7 +79,7 @@ class FeishuCCApp:
 
     def run(self) -> None:
         """Start all bots and block forever."""
-        launch_dir = os.getcwd()
+        self._launch_dir = os.getcwd()
         for bot_cfg in self._config.bots:
             domain = (
                 "https://open.feishu.cn"
@@ -94,7 +94,7 @@ class FeishuCCApp:
             bridge = ClaudeBridge(
                 bot_name=bot_cfg.name,
                 claude_path=self._config.claude_path,
-                workspace=bot_cfg.workspace or launch_dir,
+                workspace=bot_cfg.workspace or self._launch_dir,
                 system_prompt=bot_cfg.system_prompt,
                 on_permission_request=lambda req_id, prompt, val: (
                     self._on_permission(feishu, bot_cfg.name, prompt, val, req_id, current_chat[0])
@@ -228,6 +228,11 @@ class FeishuCCApp:
         """Handle incoming Feishu message → send to Claude → reply."""
         logger.info("[{}] Message from {}: {}", bot_name, chat_id, text[:80])
 
+        # Send pending startup warning (e.g. workspace not found) on first message
+        if bridge._startup_ws_warning:
+            feishu.send_text(chat_id, f"⚠️ 工作目录不存在：{bridge._startup_ws_warning}，已切换到当前目录")
+            bridge._startup_ws_warning = None
+
         rt = _find_runtime(self._bots, bridge)
         if not rt:
             logger.error("[{}] Runtime not found", bot_name)
@@ -236,6 +241,9 @@ class FeishuCCApp:
         if text.startswith("/workspace "):
             new_workspace = text[len("/workspace "):].strip()
             if new_workspace:
+                if not os.path.isdir(new_workspace):
+                    feishu.send_reply(chat_id, message_id, f"❌ 目录不存在：{new_workspace}")
+                    return
                 async def _restart():
                     try:
                         await bridge.restart(new_workspace)
