@@ -204,11 +204,11 @@ class FeishuCCApp:
                 ),
                 on_thinking=lambda thinking: (
                     feishu.send_text(current_chat[0], f"💭 {thinking}")
-                    if current_chat[0] and thinking.strip() else None
+                    if current_chat[0] and bridge._show_thinking and thinking.strip() else None
                 ),
                 on_tool_use=lambda name, brief: (
                     self._on_tool_notify(feishu, current_chat[0], name, brief)
-                    if current_chat[0] else None
+                    if current_chat[0] and bridge._show_tool_calls else None
                 ),
                 on_task_summary=lambda summary: (
                     feishu.send_text(current_chat[0], f"✅ {summary}")
@@ -224,7 +224,7 @@ class FeishuCCApp:
                 ),
                 on_tool_result=lambda content, is_error: (
                     feishu.send_text(current_chat[0], f"{'❌' if is_error else '📊'} {content[:100]}{'…' if len(content) > 100 else ''}")
-                    if current_chat[0] else None
+                    if current_chat[0] and bridge._show_tool_calls else None
                 ),
                 on_result_content=lambda content: (
                     feishu.send_text(current_chat[0], FeishuCCApp._format_result_content(content))
@@ -233,6 +233,8 @@ class FeishuCCApp:
             )
 
             bridge._pending_startup_info = True
+            bridge._show_tool_calls = True
+            bridge._show_thinking = False
 
             feishu = FeishuClient(
                 app_id=bot_cfg.app_id,
@@ -436,6 +438,18 @@ class FeishuCCApp:
 
         if text.strip() == "/restart":
             logger.info("[{}] /restart ignored (disabled)", bot_name)
+            return
+
+        if text.strip() == "/tool":
+            bridge._show_tool_calls = not bridge._show_tool_calls
+            state = "开启" if bridge._show_tool_calls else "关闭"
+            feishu.send_reply(chat_id, message_id, f"🔧 工具调用消息已{state}")
+            return
+
+        if text.strip() == "/think":
+            bridge._show_thinking = not bridge._show_thinking
+            state = "开启" if bridge._show_thinking else "关闭"
+            feishu.send_reply(chat_id, message_id, f"💭 思考内容已{state}")
             return
 
         if text.startswith("/workspace "):
