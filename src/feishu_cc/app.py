@@ -7,7 +7,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from loguru import logger
 
@@ -99,12 +99,36 @@ class FeishuCCApp:
                 on_permission_request=lambda req_id, prompt, val: (
                     self._on_permission(feishu, bot_cfg.name, prompt, val, req_id, current_chat[0])
                 ),
+                on_text=lambda text: (
+                    feishu.send_text(current_chat[0], text)
+                    if current_chat[0] else None
+                ),
+                on_thinking=lambda thinking: (
+                    feishu.send_text(current_chat[0], f"💭 {thinking}")
+                    if current_chat[0] else None
+                ),
                 on_tool_use=lambda name, brief: (
                     self._on_tool_notify(feishu, current_chat[0], name, brief)
                     if current_chat[0] else None
                 ),
                 on_task_summary=lambda summary: (
                     feishu.send_text(current_chat[0], f"✅ {summary}")
+                    if current_chat[0] else None
+                ),
+                on_system_notify=lambda summary, status: (
+                    feishu.send_text(current_chat[0], f"✅ [{status}] {summary}")
+                    if current_chat[0] else None
+                ),
+                on_error=lambda err_type, err_msg: (
+                    feishu.send_text(current_chat[0], f"❌ {err_type}: {err_msg}")
+                    if current_chat[0] else None
+                ),
+                on_tool_result=lambda content, is_error: (
+                    feishu.send_text(current_chat[0], f"{'❌' if is_error else '📊'} {content[:100]}{'…' if len(content) > 100 else ''}")
+                    if current_chat[0] else None
+                ),
+                on_result_content=lambda content: (
+                    feishu.send_text(current_chat[0], FeishuCCApp._format_result_content(content))
                     if current_chat[0] else None
                 ),
             )
@@ -152,13 +176,50 @@ class FeishuCCApp:
     def _set_chat(current_chat: list[Optional[str]], chat_id: str) -> None:
         current_chat[0] = chat_id
 
+    _TOOL_EMOJI = {
+        "Read": "📖",
+        "Write": "📝",
+        "Edit": "✏️",
+        "Glob": "📁",
+        "Grep": "🔍",
+        "Bash": "💻",
+        "Agent": "🤖",
+        "TodoWrite": "📋",
+        "WebSearch": "🌐",
+        "WebFetch": "🌐",
+        "AskUserQuestion": "❓",
+        "Skill": "⚡",
+    }
+
     @staticmethod
     def _on_tool_notify(feishu: FeishuClient, chat_id: str, name: str, brief: str) -> None:
         """Send a real-time tool_use notification to Feishu."""
-        text = f"> {name}"
+        emoji = FeishuCCApp._TOOL_EMOJI.get(name, "🛠️")
+        text = f"{emoji} {name}"
         if brief:
             text += f" {brief}"
         feishu.send_text(chat_id, text)
+
+    @staticmethod
+    def _format_result_content(content: list[dict[str, Any]]) -> str:
+        """Extract a readable summary from result event content blocks."""
+        texts = []
+        for block in content:
+            t = block.get("type", "")
+            if t == "text":
+                txt = block.get("text", "")
+                if txt:
+                    texts.append(txt[:80])
+            elif t == "tool_use":
+                texts.append(f"[{block.get('name', '?')}]")
+            elif t == "thinking":
+                texts.append("💭 …")
+        if not texts:
+            return "✅ 完成"
+        summary = " | ".join(texts[:5])
+        if len(texts) > 5:
+            summary += f" … +{len(texts) - 5} 项"
+        return f"✅ {summary}"
 
     # -- message routing -----------------------------------------------------
 

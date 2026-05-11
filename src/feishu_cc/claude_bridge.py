@@ -78,6 +78,10 @@ class ClaudeBridge:
         on_permission_request: Callable[[str, str, dict], None] | None = None,
         on_tool_use: Callable[[str, str], None] | None = None,
         on_task_summary: Callable[[str], None] | None = None,
+        on_system_notify: Callable[[str, str], None] | None = None,
+        on_error: Callable[[str, str], None] | None = None,
+        on_tool_result: Callable[[str, bool], None] | None = None,
+        on_result_content: Callable[[list], None] | None = None,
     ):
         self._bot_name = bot_name
         self._claude_path = claude_path
@@ -88,6 +92,10 @@ class ClaudeBridge:
         self._on_permission_request = on_permission_request
         self._on_tool_use = on_tool_use
         self._on_task_summary = on_task_summary
+        self._on_system_notify = on_system_notify
+        self._on_error = on_error
+        self._on_tool_result = on_tool_result
+        self._on_result_content = on_result_content
 
         self._proc: subprocess.Popen | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -107,6 +115,14 @@ class ClaudeBridge:
 
         # Init failure flag: process died before _ready was set
         self._init_failed = False
+
+        # Crash retry: limit restart loops with backoff
+        self._crash_count = 0
+        _MAX_CRASH_RETRIES = 3
+
+        # Response generation counter: prevents stale events from
+        # prematurely unblocking a subsequent send_message.
+        self._response_gen = 0
 
         # Reader threads
         self._stdout_thread: threading.Thread | None = None
@@ -217,16 +233,39 @@ class ClaudeBridge:
         self._ready.set()
 
     async def _handle_crash(self) -> None:
-        """Process died during normal operation — unblock waiters and auto-restart."""
-        # Unblock any send_message that was waiting for a response
+        """Process died during normal operation — retry with backoff."""
         self._response_done.set()
-        # Restart fresh (no resume)
+
+        self._crash_count += 1
+        if self._crash_count > 3:
+            logger.error("[{}] Claude crashed {} times, giving up", self._bot_name, self._crash_count)
+            self._alive = False
+            return
+
+        backoff = min(2 ** self._crash_count, 30)
+        logger.info("[{}] Auto-restarting Claude (attempt {}) in {}s...",
+                     self._bot_name, self._crash_count, backoff)
+
+        # Ensure old process is fully dead before spawning a new one
+        await self.stop()
+
         if self._session_file.exists():
             self._session_file.unlink()
         self._session_id = None
-        logger.info("[{}] Auto-restarting Claude process...", self._bot_name)
-        await self.start()
-        await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
+
+        await asyncio.sleep(backoff)
+        try:
+            await self.start()
+            await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
+        except Exception:
+            logger.exception("[{}] Claude restart attempt {} failed",
+                             self._bot_name, self._crash_count)
+            # If start itself fails, _handle_crash won't be triggered again
+            # by the reader thread (process never started).  Re-raise so
+            # the reader thread knows to give up.
+            raise
+
+        self._crash_count = 0
         logger.info("[{}] Claude process auto-restarted", self._bot_name)
 
     async def stop(self) -> None:
@@ -273,6 +312,7 @@ class ClaudeBridge:
                 await self.start()
                 await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
 
+            gen = self._response_gen = self._response_gen + 1
             self._response_text = ""
             self._response_done.clear()
             self._task_summaries.clear()
@@ -280,7 +320,15 @@ class ClaudeBridge:
             msg = {"type": "user", "message": {"role": "user", "content": text}}
             await self._write_json(msg)
 
-            await asyncio.wait_for(self._response_done.wait(), timeout=timeout)
+            # Guard against stale result events (from a previous message
+            # delivered late) by comparing the generation counter.
+            while True:
+                await asyncio.wait_for(self._response_done.wait(), timeout=timeout)
+                if self._response_gen > gen:
+                    break
+                # Stale event — ignore and re-wait
+                logger.debug("[{}] Ignoring stale result event (gen={})", self._bot_name, self._response_gen)
+                self._response_done.clear()
             return self._response_text
 
     async def restart(self, workspace: str) -> None:
@@ -293,22 +341,27 @@ class ClaudeBridge:
         await self.start()
 
     async def respond_permission(self, request_id: str, behavior: str) -> None:
-        msg = {
-            "type": "control_response",
-            "response": {
-                "subtype": "success",
-                "request_id": request_id,
-                "response": {"behavior": behavior},
-            },
-        }
-        await self._write_json(msg)
-        logger.info("[{}] Permission {} for request {}", self._bot_name, behavior, request_id)
+        async with self._send_lock:
+            msg = {
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request_id,
+                    "response": {"behavior": behavior},
+                },
+            }
+            await self._write_json(msg)
+            logger.info("[{}] Permission {} for request {}", self._bot_name, behavior, request_id)
 
     # -- internal: stdout line processing (runs on event loop) --------------
 
     async def _handle_line(self, text: str) -> None:
         """Parse a single JSON line from stdout."""
-        event = json.loads(text)
+        try:
+            event = json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning("[{}] Invalid JSON from Claude: {}", self._bot_name, text[:200])
+            return
         await self._handle_event(event)
 
     async def _handle_event(self, event: dict[str, Any]) -> None:
@@ -343,6 +396,11 @@ class ClaudeBridge:
                             self._on_task_summary(summary)
                         except Exception:
                             logger.exception("[{}] on_task_summary callback failed", self._bot_name)
+                    if self._on_system_notify:
+                        try:
+                            self._on_system_notify(summary, event.get("status", ""))
+                        except Exception:
+                            logger.exception("[{}] on_system_notify callback failed", self._bot_name)
                 return
 
             logger.debug("[{}] System event: {}", self._bot_name, event)
@@ -367,10 +425,35 @@ class ClaudeBridge:
                         except Exception:
                             logger.exception("[{}] on_thinking callback failed", self._bot_name)
                 elif block_type == "tool_use":
+                    # JSON stream-json 协议中 tool_use block 示例：
+                    #
+                    # Read 工具:
+                    #   {"type":"tool_use","name":"Read","input":{"file_path":"src/foo.py"}}
+                    #   → 飞书显示: "> Read src/foo.py"
+                    #
+                    # Agent 工具:
+                    #   {"type":"tool_use","name":"Agent","input":{"description":"探索代码","prompt":"查找路由定义"}}
+                    #   → 飞书显示: "> Agent 探索代码" (brief_input 取 description)
+                    #
+                    # TodoWrite 工具:
+                    #   {"type":"tool_use","name":"TodoWrite","input":{"todos":[{"content":"修复bug","status":"in_progress"}]}}
+                    #   → 飞书显示: "> TodoWrite" (brief_input 取不到, 只显示 name)
+                    #
+                    # Bash 工具:
+                    #   {"type":"tool_use","name":"Bash","input":{"command":"pytest tests/"}}
+                    #   → 飞书显示: "> Bash pytest tests/"
                     name = block.get("name", "")
                     inp = block.get("input", {})
+                    # brief_input 优先级: command > path > file_path > description
+                    # 覆盖 Agent/Bash/Read/Edit/Write/Glob/Grep 等常见工具
                     if isinstance(inp, dict):
-                        brief_inp = inp.get("command") or inp.get("path") or inp.get("file_path") or ""
+                        brief_inp = (
+                            inp.get("command")
+                            or inp.get("path")
+                            or inp.get("file_path")
+                            or inp.get("description")
+                            or ""
+                        )
                     else:
                         brief_inp = ""
                     logger.debug("[{}] Tool use: {}{}", self._bot_name, name, f" {brief_inp}" if brief_inp else "")
@@ -381,15 +464,43 @@ class ClaudeBridge:
                         except Exception:
                             logger.exception("[{}] on_tool_use callback failed", self._bot_name)
 
+                elif block_type == "tool_result":
+                    tool_content = block.get("content", "")
+                    is_error = block.get("is_error", False)
+                    if self._on_tool_result:
+                        try:
+                            self._on_tool_result(str(tool_content)[:200], is_error)
+                        except Exception:
+                            logger.exception("[{}] on_tool_result callback failed", self._bot_name)
+
         elif event_type == "user":
             logger.debug("[{}] User event: {}", self._bot_name, event.get("message", {}).get("content", ""))
 
+        elif event_type == "error":
+            err = event.get("error", {})
+            err_type = err.get("type", "")
+            err_msg = err.get("message", "")
+            logger.error("[{}] Error event: {} - {}", self._bot_name, err_type, err_msg)
+            if self._on_error:
+                try:
+                    self._on_error(err_type, err_msg)
+                except Exception:
+                    logger.exception("[{}] on_error callback failed", self._bot_name)
+
         elif event_type == "result":
+            if self._on_result_content:
+                try:
+                    result_data = event.get("result", {})
+                    content = result_data.get("content", [])
+                    self._on_result_content(content)
+                except Exception:
+                    logger.exception("[{}] on_result_content callback failed", self._bot_name)
             if self._task_summaries:
                 summary_str = ", ".join(dict.fromkeys(self._task_summaries))
                 self._response_text = f"> {summary_str}\n\n" + self._response_text
                 self._task_summaries.clear()
             logger.debug("[{}] Result event: {}", self._bot_name, event)
+            self._response_gen += 1
             self._response_done.set()
 
         elif event_type == "control_request":

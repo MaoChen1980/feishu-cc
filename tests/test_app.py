@@ -115,7 +115,7 @@ class TestOnToolNotify:
         sent: list[str] = []
         feishu = type("MockFeishu", (), {"send_text": lambda self, cid, t: sent.append(t)})()
         FeishuCCApp._on_tool_notify(feishu, "chat_1", "Bash", "pytest tests/")
-        assert sent == ["> Bash pytest tests/"]
+        assert sent == ["💻 Bash pytest tests/"]
 
     def test_sends_tool_name_only_without_input(self) -> None:
         from feishu_cc.app import FeishuCCApp
@@ -123,7 +123,7 @@ class TestOnToolNotify:
         sent: list[str] = []
         feishu = type("MockFeishu", (), {"send_text": lambda self, cid, t: sent.append(t)})()
         FeishuCCApp._on_tool_notify(feishu, "chat_1", "Read", "")
-        assert sent == ["> Read"]
+        assert sent == ["📖 Read"]
 
 
 class TestOnMessage:

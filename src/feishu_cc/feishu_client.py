@@ -7,8 +7,6 @@ import json
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 from loguru import logger
@@ -45,7 +43,6 @@ class FeishuClient:
         self._on_card_action = on_card_action
 
         self._client: Any = None
-        self._thread_pool = ThreadPoolExecutor(max_workers=10)
         self._dedup: dict[str, float] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
