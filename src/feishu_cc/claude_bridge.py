@@ -503,7 +503,9 @@ class ClaudeBridge:
             if self._on_result_content:
                 try:
                     result_data = event.get("result", {})
-                    content = result_data.get("content", [])
+                    content = result_data if isinstance(result_data, list) else (
+                        result_data.get("content", []) if isinstance(result_data, dict) else []
+                    )
                     self._on_result_content(content)
                 except Exception:
                     logger.exception("[{}] on_result_content callback failed", self._bot_name)

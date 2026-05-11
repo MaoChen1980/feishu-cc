@@ -13,7 +13,7 @@ from typing import Any, Optional, Union
 from loguru import logger
 
 from feishu_cc.claude_bridge import ClaudeBridge, _RESPONSE_TIMEOUT
-from feishu_cc.config import Config
+from feishu_cc.config import CONFIG_DIR, Config
 from feishu_cc.feishu_client import FeishuClient
 
 
@@ -104,7 +104,7 @@ class FeishuCCApp:
                 ),
                 on_text=lambda text: (
                     feishu.send_text(current_chat[0], text)
-                    if current_chat[0] else None
+                    if current_chat[0] and "---quick-replies" not in text else None
                 ),
                 on_thinking=lambda thinking: (
                     feishu.send_text(current_chat[0], f"💭 {thinking}")
@@ -164,6 +164,10 @@ class FeishuCCApp:
         for rt in self._bots:
             rt.feishu.start()
 
+        # Proactive startup notification to the last known chat
+        for rt in self._bots:
+            rt.schedule(self._send_proactive_startup(rt))
+
         logger.info("All bots started — waiting for messages...")
 
         try:
@@ -180,6 +184,54 @@ class FeishuCCApp:
     @staticmethod
     def _set_chat(current_chat: list[Optional[str]], chat_id: str) -> None:
         current_chat[0] = chat_id
+
+    @staticmethod
+    def _save_last_chat(bot_name: str, chat_id: str) -> None:
+        """Persist the most recent chat_id per bot so we can send proactive
+        notifications on the next startup."""
+        path = CONFIG_DIR / "sessions" / f"{bot_name}.chat"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(chat_id, encoding="utf-8")
+
+    @staticmethod
+    def _load_last_chat(bot_name: str) -> str | None:
+        path = CONFIG_DIR / "sessions" / f"{bot_name}.chat"
+        if path.exists():
+            cid = path.read_text(encoding="utf-8").strip()
+            return cid if cid else None
+        return None
+
+    async def _send_proactive_startup(self, rt: _BotRuntime) -> None:
+        """Wait for Claude session, then send a startup notification to the
+        last known chat (from a previous session)."""
+        bridge = rt.bridge
+        if not bridge._ready.is_set():
+            try:
+                await asyncio.wait_for(bridge._ready.wait(), timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning("[{}] Bridge not ready in time for startup notification", rt.name)
+                return
+
+        chat_id = self._load_last_chat(bridge._bot_name)
+        if not chat_id:
+            logger.info("[{}] No saved chat_id for startup notification", rt.name)
+            return
+
+        lines = [
+            f"🚀 feishu-cc 已就绪",
+            f"🕐 {self._startup_time}",
+            f"📂 启动目录: {self._launch_dir}",
+        ]
+        if bridge._startup_ws_warning:
+            lines.append(f"⚠️ 配置工作目录不存在：{bridge._startup_ws_warning}，已使用启动目录")
+        else:
+            lines.append(f"🔧 Workspace: {bridge._workspace}")
+
+        rt.feishu.send_text(chat_id, "\n".join(lines))
+        logger.info("[{}] Startup notification sent to {}", rt.name, chat_id)
+
+        # Already notified — skip the pending startup info on first message
+        bridge._pending_startup_info = False
 
     _TOOL_EMOJI = {
         "Read": "📖",
@@ -232,6 +284,9 @@ class FeishuCCApp:
                     chat_id: str, text: str, message_id: str) -> None:
         """Handle incoming Feishu message → send to Claude → reply."""
         logger.info("[{}] Message from {}: {}", bot_name, chat_id, text[:80])
+
+        # Save chat_id for proactive startup notification next time
+        self._save_last_chat(bot_name, chat_id)
 
         # Send startup info on first message
         if getattr(bridge, '_pending_startup_info', False):
