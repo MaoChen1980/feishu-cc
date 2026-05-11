@@ -445,8 +445,8 @@ class ClaudeBridge:
 
         try:
             proc.stdin.close()
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("[{}] stdin close error (pid={}): {}", self._bot_name, pid, e)
 
         try:
             proc.terminate()
@@ -460,8 +460,8 @@ class ClaudeBridge:
             proc.wait(timeout=5)
             logger.info("[{}] Claude subprocess killed (pid={}, returncode={})",
                         self._bot_name, pid, proc.returncode)
-        except OSError:
-            pass  # Already dead / access denied
+        except OSError as e:
+            logger.debug("[{}] terminate/kill error (pid={}): {}", self._bot_name, pid, e)
 
     # -- send ----------------------------------------------------------------
 
@@ -478,6 +478,10 @@ class ClaudeBridge:
 
             # Recover from init failure (stale session, crashed process, etc.)
             if self._init_failed or not self._alive:
+                logger.info("[{}] Claude down _init_failed={} _alive={} _crash_handling={} crash_count={}",
+                            self._bot_name, self._init_failed, self._alive,
+                            self._crash_handling, len(self._crash_times))
+
                 # If a crash handler is already running, wait for it to finish
                 # instead of racing to start a new process.  Without this wait,
                 # send_message recovery starts a process that the in-flight
@@ -495,7 +499,8 @@ class ClaudeBridge:
                 # Crash handler may have already restarted Claude by now — re-check
                 # before starting a second process.
                 if self._alive and self._ready.is_set():
-                    logger.info("[{}] Crash handler already recovered Claude", self._bot_name)
+                    logger.info("[{}] Crash handler already recovered Claude (crash_count={})",
+                                self._bot_name, len(self._crash_times))
                 else:
                     logger.info("[{}] Recovering Claude process...", self._bot_name)
                     if self._session_file.exists():

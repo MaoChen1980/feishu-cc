@@ -33,7 +33,8 @@ def _git_version() -> str:
         if branch and branch != "HEAD":
             return f"{desc} ({branch})"
         return desc or ""
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to get git version: {}", e)
         return ""
 
 
@@ -73,8 +74,8 @@ class _BotRuntime:
             fut = asyncio.run_coroutine_threadsafe(self._shutdown_async(), self.loop)
             try:
                 fut.result(timeout=10)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Error during bridge shutdown: {}", e)
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self._thread:
             self._thread.join(timeout=3)
@@ -126,8 +127,8 @@ class _SelfHealState:
                     return _SelfHealState(
                         path=log_path, position=data.get("position", 0)
                     )
-            except (json.JSONDecodeError, KeyError):
-                pass
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.debug("Invalid heal state file: {}", e)
         # New file or path mismatch → skip existing content
         state = _SelfHealState(path=log_path, position=0)
         state._skip_existing()
@@ -284,8 +285,8 @@ class FeishuCCApp:
             for rt in reversed(self._bots):
                 try:
                     rt.stop_loop()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Error stopping bot during cleanup: {}", e)
             raise
 
         return

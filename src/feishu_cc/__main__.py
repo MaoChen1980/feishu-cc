@@ -34,9 +34,10 @@ def _check_pid() -> None:
             try:
                 os.kill(old_pid, 0)  # signal 0 = probe alive
             except PermissionError:
-                pass  # process exists but owned by another user
+                logger.warning("PID {} exists but access denied — another instance is running", old_pid)
+                sys.exit(1)
             except OSError:
-                pass  # process not found — stale PID
+                logger.debug("Stale PID {} found, overwriting", old_pid)
             else:
                 logger.error("Another instance (PID {}) is already running, exiting.", old_pid)
                 sys.exit(1)
