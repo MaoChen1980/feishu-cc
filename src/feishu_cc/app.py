@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import json
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -71,6 +73,74 @@ class _BotRuntime:
         asyncio.run_coroutine_threadsafe(coro, self.loop)
 
 
+# Self-healing constants
+_SELF_HEAL_INTERVAL = 1200  # 20 minutes between checks
+_MAX_ERROR_CHARS = 8000  # max chars to send to Claude
+_GIT_DIFF_TIMEOUT = 10  # seconds
+
+
+class _SelfHealState:
+    """Tracks byte position in log file for incremental ERROR scanning."""
+
+    def __init__(self, path: str = "", position: int = 0):
+        self.path = path
+        self.position = position
+
+    @staticmethod
+    def _state_path() -> Path:
+        return CONFIG_DIR / "self_heal" / "state.json"
+
+    def save(self) -> None:
+        p = self._state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps({"path": self.path, "position": self.position}),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def load(log_path: str) -> _SelfHealState:
+        p = _SelfHealState._state_path()
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if data.get("path") == log_path:
+                    return _SelfHealState(
+                        path=log_path, position=data.get("position", 0)
+                    )
+            except (json.JSONDecodeError, KeyError):
+                pass
+        # New file or path mismatch → skip existing content
+        state = _SelfHealState(path=log_path, position=0)
+        state._skip_existing()
+        return state
+
+    def _skip_existing(self) -> None:
+        """On first encounter of a log file, set position to EOF."""
+        log_path = Path(self.path)
+        if log_path.exists():
+            self.position = log_path.stat().st_size
+            self.save()
+
+    def get_new_errors(self) -> list[str]:
+        """Read new ERROR lines since last tracked position."""
+        log_path = Path(self.path)
+        if not log_path.exists():
+            self.position = 0
+            return []
+
+        file_size = log_path.stat().st_size
+        if file_size < self.position:
+            self.position = 0
+
+        with open(log_path, "r", encoding="utf-8") as f:
+            f.seek(self.position)
+            lines = f.readlines()
+            self.position = f.tell()
+
+        return [line.rstrip("\n\r") for line in lines if "| ERROR" in line]
+
+
 class FeishuCCApp:
     """Main application. Wires Feishu WS → Claude Bridge for each bot."""
 
@@ -78,6 +148,9 @@ class FeishuCCApp:
         self._config = Config.load(config_path)
         self._bots: list[_BotRuntime] = []
         self._restart_args = sys.argv
+        self._restart_requested = threading.Event()
+        self._heal_state: _SelfHealState | None = None
+        self._chat_ctx: dict[str, list[Optional[str]]] = {}
 
     def run(self) -> None:
         """Start all bots and block forever."""
@@ -93,6 +166,7 @@ class FeishuCCApp:
             # Track current chat on the bridge so permission callbacks
             # know where to send the permission card.
             current_chat: list[Optional[str]] = [None]
+            self._chat_ctx[bot_cfg.name] = current_chat
 
             bridge = ClaudeBridge(
                 bot_name=bot_cfg.name,
@@ -170,14 +244,26 @@ class FeishuCCApp:
 
         logger.info("All bots started — waiting for messages...")
 
+        # Schedule self-heal loop on first bot
+        if self._bots:
+            rt = self._bots[0]
+            rt.schedule(self._self_heal_loop(rt))
+
         try:
-            while True:
+            while not self._restart_requested.is_set():
                 time.sleep(10)
         except KeyboardInterrupt:
             logger.info("Shutting down...")
             for rt in reversed(self._bots):
                 rt.stop_loop()
             logger.info("Goodbye.")
+            return
+
+        # Self-heal detected code changes → restart
+        logger.info("Self-heal: changes applied, restarting...")
+        for rt in reversed(self._bots):
+            rt.stop_loop()
+        self._restart_app()
 
     # -- helpers -------------------------------------------------------------
 
@@ -361,9 +447,13 @@ class FeishuCCApp:
             logger.error("[{}] Runtime not found", bot_name)
             return
 
+        if reply_text.startswith("__perm_allow_once__:"):
+            request_id = reply_text.split(":", 1)[1]
+            rt.schedule(bridge.respond_permission(request_id, "allow_once"))
+            return
         if reply_text.startswith("__perm_allow__:"):
             request_id = reply_text.split(":", 1)[1]
-            rt.schedule(bridge.respond_permission(request_id, "allow"))
+            rt.schedule(bridge.respond_permission(request_id, "allow_this_time"))
             return
         if reply_text.startswith("__perm_deny__:"):
             request_id = reply_text.split(":", 1)[1]
@@ -395,6 +485,123 @@ class FeishuCCApp:
             feishu.send_permission_card(chat_id, prompt, request_id, value)
         else:
             logger.warning("[{}] No chat_id for permission request", bot_name)
+
+    # -- self-healing ----------------------------------------------------------
+
+    async def _self_heal_loop(self, rt: _BotRuntime) -> None:
+        """Background loop: check logs periodically for ERRORs, auto-fix."""
+        bridge = rt.bridge
+        try:
+            await asyncio.wait_for(bridge._ready.wait(), timeout=60.0)
+        except asyncio.TimeoutError:
+            logger.warning("[self-heal] Bridge not ready, skipping self-heal")
+            return
+
+        # Initial wait before first check so startup chatter settles
+        await asyncio.sleep(_SELF_HEAL_INTERVAL)
+
+        while not self._restart_requested.is_set():
+            await self._execute_self_heal(rt)
+            # Poll every 10s for restart signal, then re-check
+            for _ in range(_SELF_HEAL_INTERVAL // 10):
+                if self._restart_requested.is_set():
+                    return
+                await asyncio.sleep(10)
+            remainder = _SELF_HEAL_INTERVAL % 10
+            if remainder:
+                await asyncio.sleep(remainder)
+
+    async def _execute_self_heal(self, rt: _BotRuntime) -> None:
+        """Scan log for new ERRORs, send to Claude for analysis and fix."""
+        today = time.strftime("%Y-%m-%d")
+        log_file = CONFIG_DIR / "logs" / f"feishu-cc_{today}.log"
+        if not log_file.exists():
+            return
+
+        log_path_str = str(log_file)
+        if self._heal_state is None or self._heal_state.path != log_path_str:
+            self._heal_state = _SelfHealState.load(log_path_str)
+
+        error_lines = self._heal_state.get_new_errors()
+        self._heal_state.save()
+
+        if not error_lines:
+            return
+
+        error_text = "\n".join(error_lines)
+        if len(error_text) > _MAX_ERROR_CHARS:
+            error_text = error_text[:_MAX_ERROR_CHARS] + "\n... (truncated)"
+
+        prompt = (
+            f"下面是我的 feishu-cc 项目日志中出现的 ERROR 条目：\n\n"
+            f"```\n{error_text}\n```\n\n"
+            f"请分析这些错误的原因并修复它们。你可以：\n"
+            f"1. 读取相关源代码文件\n"
+            f"2. 诊断根本原因\n"
+            f"3. 修改代码修复问题\n"
+            f"4. 用 `git diff` 验证修改\n\n"
+            f"限制：不要修改 __main__.py、测试文件、以及 self-heal 自愈逻辑本身。\n"
+            f"完成修复后请说明修改了什么。"
+        )
+
+        logger.info("[self-heal] {} ERROR lines found, sending to Claude", len(error_lines))
+
+        # Advance position before sending (feedback loop prevention)
+        file_size = log_file.stat().st_size
+        if file_size > self._heal_state.position:
+            self._heal_state.position = file_size
+            self._heal_state.save()
+
+        # Suppress streaming callbacks during self-heal so user doesn't see noise
+        chat_ctx = self._chat_ctx.get(rt.name)
+        saved_chat = chat_ctx[0] if chat_ctx else None
+        if chat_ctx:
+            chat_ctx[0] = None
+
+        bridge = rt.bridge
+        project_root = bridge._workspace
+        has_changes_before = self._check_git_diff(project_root)
+
+        try:
+            response = await bridge.send_message(prompt)
+            if response:
+                logger.info("[self-heal] Claude analysis: {}...", response[:200])
+        except Exception as e:
+            logger.warning("[self-heal] Claude analysis failed: {}", e)
+            return
+        finally:
+            if chat_ctx and saved_chat:
+                chat_ctx[0] = saved_chat
+
+        has_changes_after = self._check_git_diff(project_root)
+
+        if has_changes_after and not has_changes_before:
+            logger.info("[self-heal] Code changes detected, requesting restart")
+            self._restart_requested.set()
+
+    @staticmethod
+    def _check_git_diff(project_root: str) -> bool:
+        """Check if git working tree has uncommitted changes."""
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--quiet"],
+                cwd=project_root,
+                timeout=_GIT_DIFF_TIMEOUT,
+            )
+            if result.returncode != 0:
+                return True
+            result = subprocess.run(
+                ["git", "diff", "--cached", "--quiet"],
+                cwd=project_root,
+                timeout=_GIT_DIFF_TIMEOUT,
+            )
+            return result.returncode != 0
+        except subprocess.TimeoutExpired:
+            logger.warning("[self-heal] git diff timed out")
+            return False
+        except Exception as e:
+            logger.warning("[self-heal] git diff failed: {}", e)
+            return False
 
 
 def _find_runtime(bots: list[_BotRuntime], bridge: ClaudeBridge) -> _BotRuntime | None:

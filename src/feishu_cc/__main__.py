@@ -13,6 +13,8 @@ import sys
 
 from loguru import logger
 
+from feishu_cc.config import CONFIG_DIR
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="feishu-cc — Feishu IM bridge for Claude Code CLI")
@@ -29,6 +31,16 @@ def main() -> None:
 
     logger.remove()
     logger.add(sys.stderr, level=args.log_level)
+
+    log_dir = CONFIG_DIR / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logger.add(
+        log_dir / "feishu-cc_{time:YYYY-MM-DD}.log",
+        level="DEBUG",
+        rotation="10 MB",
+        retention=30,
+        encoding="utf-8",
+    )
 
     from feishu_cc.app import FeishuCCApp
 

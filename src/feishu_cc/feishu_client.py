@@ -395,17 +395,23 @@ class FeishuClient:
 
     def send_permission_card(self, chat_id: str, prompt: str, request_id: str,
                              value: Optional[dict] = None) -> None:
-        """Send a permission request card with allow/deny buttons."""
+        """Send a permission request card with allow_once/allow_this_time/deny buttons."""
+        logger.debug("[{}] Permission value: {}", chat_id, value)
+
+        content = ""
         if value:
-            # 优先使用 detailed permission_prompt（最可读）
-            permission_prompt = value.get("permission_prompt", "")
+            display_text = (
+                value.get("permission_prompt")
+                or value.get("prompt")
+                or ""
+            )
             tool_name = value.get("tool_name", "")
             tool_args = value.get("tool_args", {})
-            if permission_prompt:
+            if display_text:
                 if tool_name:
-                    content = f"**{tool_name} 请求权限**\n\n{permission_prompt}"
+                    content = f"**{tool_name} 请求权限**\n\n{display_text}"
                 else:
-                    content = f"**请求权限**\n\n{permission_prompt}"
+                    content = f"**请求权限**\n\n{display_text}"
             elif tool_name and tool_args:
                 args_str = "\n".join(
                     f"  **{k}**: `{v}`"
@@ -414,16 +420,22 @@ class FeishuClient:
                 )
                 content = f"**{tool_name} 请求权限**\n{args_str}"
             else:
-                # 兜底：递归显示所有字段
                 details = FeishuClient._format_permission_value(value)
-                content = f"**{prompt}**\n{details}"
-        else:
+                content = f"**{prompt}**\n{details}" if details else ""
+        if not content:
             content = prompt
+
         elements = [
             {"tag": "markdown", "content": content},
             {
                 "tag": "button",
-                "text": {"tag": "plain_text", "content": "允许"},
+                "text": {"tag": "plain_text", "content": "🟢 允许一次"},
+                "type": "primary",
+                "value": {"qr": f"__perm_allow_once__:{request_id}", "cid": chat_id},
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "允许本次"},
                 "type": "primary",
                 "value": {"qr": f"__perm_allow__:{request_id}", "cid": chat_id},
             },

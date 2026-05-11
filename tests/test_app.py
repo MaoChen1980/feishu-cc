@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from feishu_cc.app import _BotRuntime, _find_runtime
@@ -169,6 +171,9 @@ class TestRunShutdown:
         app = FeishuCCApp.__new__(FeishuCCApp)
         app._config = MagicMock()
         app._bots = []
+        app._restart_requested = threading.Event()
+        app._heal_state = None
+        app._chat_ctx = {}
 
         mock_rt = MagicMock()
         mock_rt.name = "test"

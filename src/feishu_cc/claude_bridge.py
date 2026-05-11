@@ -353,6 +353,12 @@ class ClaudeBridge:
         await self.start()
 
     async def respond_permission(self, request_id: str, behavior: str) -> None:
+        """Respond to a permission request from Claude.
+
+        Uses _send_lock to avoid racing with other stdin writes.
+        NOTE: send_message releases _send_lock BEFORE waiting for
+        _response_done, so holding it here cannot deadlock.
+        """
         async with self._send_lock:
             msg = {
                 "type": "control_response",
@@ -363,7 +369,7 @@ class ClaudeBridge:
                 },
             }
             await self._write_json(msg)
-            logger.info("[{}] Permission {} for request {}", self._bot_name, behavior, request_id)
+        logger.info("[{}] Permission {} for request {}", self._bot_name, behavior, request_id)
 
     # -- internal: stdout line processing (runs on event loop) --------------
 
