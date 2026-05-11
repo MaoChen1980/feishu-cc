@@ -188,6 +188,10 @@ class ClaudeBridge:
         # silently with empty _response_text.
         self._response_error: Exception | None = None
 
+        # Timestamp of last activity from Claude (text, tool_use, etc.)
+        # Used for idle-timeout instead of fixed wall-clock timeout.
+        self._last_activity = time.monotonic()
+
         # Startup workspace warning: set when configured workspace is missing
         self._startup_ws_warning: str | None = None
 
@@ -277,13 +281,16 @@ class ClaudeBridge:
         """Thread: drains stdout line by line, dispatches to event loop."""
 
         def _drain() -> None:
-            for raw in iter(self._proc.stdout.readline, b""):
-                text = raw.decode("utf-8", errors="replace").strip()
-                if not text:
-                    continue
-                asyncio.run_coroutine_threadsafe(
-                    self._handle_line(text), self._loop
-                )
+            try:
+                for raw in iter(self._proc.stdout.readline, b""):
+                    text = raw.decode("utf-8", errors="replace").strip()
+                    if not text:
+                        continue
+                    asyncio.run_coroutine_threadsafe(
+                        self._handle_line(text), self._loop
+                    )
+            except Exception:
+                logger.exception("[{}] stdout read error", self._bot_name)
 
             # Pipe closed → process exited
             self._alive = False
@@ -521,8 +528,27 @@ class ClaudeBridge:
 
             # Guard against stale result events (from a previous message
             # delivered late) by comparing the generation counter.
+            # Idle timeout: only timeout when Claude has been completely
+            # silent for `timeout` seconds — any event (text, tool_use,
+            # thinking, tool_result) resets the timer.
+            self._last_activity = time.monotonic()
+            _CHECK_INTERVAL = 30.0
             while True:
-                await asyncio.wait_for(self._response_done.wait(), timeout=timeout)
+                while not self._response_done.is_set():
+                    idle = time.monotonic() - self._last_activity
+                    remaining = timeout - idle
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError(
+                            f"Claude idle for {idle:.0f}s (timeout={timeout:.0f}s)"
+                        )
+                    try:
+                        await asyncio.wait_for(
+                            self._response_done.wait(),
+                            timeout=min(remaining, _CHECK_INTERVAL),
+                        )
+                    except asyncio.TimeoutError:
+                        continue  # re-check idle time
+
                 if self._response_gen > gen:
                     break
                 # Stale event — ignore and re-wait
@@ -579,6 +605,7 @@ class ClaudeBridge:
 
     async def _handle_event(self, event: dict[str, Any]) -> None:
         """Process a single JSON event from Claude."""
+        self._last_activity = time.monotonic()
         event_type = event.get("type", "")
 
         if event_type == "system":

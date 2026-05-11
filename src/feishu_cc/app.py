@@ -380,7 +380,21 @@ class FeishuCCApp:
                 if txt:
                     texts.append(txt[:80])
             elif t == "tool_use":
-                texts.append(f"[{block.get('name', '?')}]")
+                name = block.get("name", "?")
+                inp = block.get("input", {})
+                brief = ""
+                if isinstance(inp, dict):
+                    brief = (
+                        inp.get("command")
+                        or inp.get("text")
+                        or inp.get("content")
+                        or inp.get("query")
+                        or inp.get("file_path")
+                        or inp.get("description")
+                        or inp.get("path")
+                        or ""
+                    )
+                texts.append(f"[{name}] {brief[:60]}" if brief else f"[{name}]")
             elif t == "thinking":
                 texts.append("💭 …")
         if not texts:
@@ -455,7 +469,6 @@ class FeishuCCApp:
                 feishu.send_plain_text(chat_id, "✅ 空闲")
             except asyncio.TimeoutError:
                 logger.warning("[{}] Timeout processing message from {} ({}s)", bot_name, chat_id, _RESPONSE_TIMEOUT)
-                bridge._init_failed = True
                 feishu.send_plain_text(chat_id, "⏰ 处理超时，请重试")
             except ConnectionError:
                 logger.warning("[{}] Connection lost to Claude for {}", bot_name, chat_id)
