@@ -19,6 +19,24 @@ from feishu_cc.config import CONFIG_DIR, Config
 from feishu_cc.feishu_client import FeishuClient
 
 
+def _git_version() -> str:
+    """Return short git description: tag/branch + commit hash, or empty."""
+    try:
+        desc = subprocess.run(
+            ["git", "describe", "--tags", "--always", "--dirty"],
+            capture_output=True, text=True, timeout=3,
+        ).stdout.strip()
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=3,
+        ).stdout.strip()
+        if branch and branch != "HEAD":
+            return f"{desc} ({branch})"
+        return desc or ""
+    except Exception:
+        return ""
+
+
 class _BotRuntime:
     """State for a single bot — owns its own asyncio loop + threads."""
 
@@ -154,6 +172,9 @@ class FeishuCCApp:
 
     def run(self) -> None:
         """Start all bots and block forever."""
+        git_ver = _git_version()
+        if git_ver:
+            logger.info("feishu-cc version: {}", git_ver)
         self._launch_dir = os.getcwd()
         self._startup_time = time.strftime("%Y-%m-%d %H:%M:%S")
         for bot_cfg in self._config.bots:
