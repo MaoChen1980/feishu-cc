@@ -80,6 +80,7 @@ class FeishuCCApp:
     def run(self) -> None:
         """Start all bots and block forever."""
         self._launch_dir = os.getcwd()
+        self._startup_time = time.strftime("%Y-%m-%d %H:%M:%S")
         for bot_cfg in self._config.bots:
             domain = (
                 "https://open.feishu.cn"
@@ -105,7 +106,7 @@ class FeishuCCApp:
                 ),
                 on_thinking=lambda thinking: (
                     feishu.send_text(current_chat[0], f"💭 {thinking}")
-                    if current_chat[0] else None
+                    if current_chat[0] and thinking.strip() else None
                 ),
                 on_tool_use=lambda name, brief: (
                     self._on_tool_notify(feishu, current_chat[0], name, brief)
@@ -132,6 +133,8 @@ class FeishuCCApp:
                     if current_chat[0] else None
                 ),
             )
+
+            bridge._pending_startup_info = True
 
             feishu = FeishuClient(
                 app_id=bot_cfg.app_id,
@@ -228,10 +231,20 @@ class FeishuCCApp:
         """Handle incoming Feishu message → send to Claude → reply."""
         logger.info("[{}] Message from {}: {}", bot_name, chat_id, text[:80])
 
-        # Send pending startup warning (e.g. workspace not found) on first message
-        if bridge._startup_ws_warning:
-            feishu.send_text(chat_id, f"⚠️ 工作目录不存在：{bridge._startup_ws_warning}，已切换到当前目录")
-            bridge._startup_ws_warning = None
+        # Send startup info on first message
+        if getattr(bridge, '_pending_startup_info', False):
+            lines = [
+                f"🚀 feishu-cc 已启动",
+                f"🕐 {self._startup_time}",
+                f"📂 启动目录: {self._launch_dir}",
+            ]
+            if bridge._startup_ws_warning:
+                lines.append(f"⚠️ 配置的工作目录不存在：{bridge._startup_ws_warning}，已使用启动目录")
+                bridge._startup_ws_warning = None
+            else:
+                lines.append(f"🔧 Workspace: {bridge._workspace}")
+            feishu.send_text(chat_id, "\n".join(lines))
+            bridge._pending_startup_info = False
 
         rt = _find_runtime(self._bots, bridge)
         if not rt:
