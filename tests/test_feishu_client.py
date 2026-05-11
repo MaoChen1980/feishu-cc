@@ -576,6 +576,7 @@ class TestSendImplementations:
         client = FeishuClient(app_id="t", app_secret="t")
         calls = 0
         class R:
+            code = 0
             def success(self): return True
         class S:
             def create(self, req):

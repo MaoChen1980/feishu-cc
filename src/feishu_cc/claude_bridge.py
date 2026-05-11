@@ -567,7 +567,10 @@ class ClaudeBridge:
         except json.JSONDecodeError:
             logger.warning("[{}] Invalid JSON from Claude: {}", self._bot_name, text[:200])
             return
-        await self._handle_event(event)
+        try:
+            await self._handle_event(event)
+        except Exception:
+            logger.exception("[{}] Unhandled error in event handler", self._bot_name)
 
     async def _handle_event(self, event: dict[str, Any]) -> None:
         """Process a single JSON event from Claude."""

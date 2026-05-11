@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 import threading
 import time
 from typing import Any, Callable, Optional
+
+from requests.exceptions import RequestException
 
 from loguru import logger
 
@@ -212,7 +215,11 @@ class FeishuClient:
             .file_key(image_key) \
             .type("image") \
             .build()
-        response = self._client.im.v1.message_resource.get(request)
+        try:
+            response = self._http_retry(lambda: self._client.im.v1.message_resource.get(request))
+        except RequestException:
+            logger.exception("Failed to download image {}", image_key)
+            return ""
         if response.code != 0 or not response.file:
             status = response.raw.status_code if response.raw else "N/A"
             logger.warning("Failed to download image {}: code={}, msg={}, http_status={}",
@@ -244,7 +251,11 @@ class FeishuClient:
         from lark_oapi.api.im.v1 import GetMessageRequest
 
         request = GetMessageRequest.builder().message_id(message_id).build()
-        response = self._client.im.v1.message.get(request)
+        try:
+            response = self._http_retry(lambda: self._client.im.v1.message.get(request))
+        except RequestException:
+            logger.exception("Failed to fetch quoted message {}", message_id)
+            return ""
         if response.success():
             items = response.data.items
             if items:
@@ -348,6 +359,24 @@ class FeishuClient:
             else:
                 result.extend(table_lines)
         return "\n".join(result)
+
+    # -- HTTP retry ----------------------------------------------------------
+
+    @staticmethod
+    def _http_retry(request_fn, max_retries=2, base_delay=1.0):
+        """Execute HTTP request with exponential backoff on network errors."""
+        for attempt in range(max_retries + 1):
+            try:
+                return request_fn()
+            except RequestException as e:
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                    logger.warning("HTTP request failed, retry {}/{} in {:.1f}s: {}",
+                                   attempt + 1, max_retries, delay, e)
+                    time.sleep(delay)
+                else:
+                    logger.error("HTTP request failed after {} retries: {}", max_retries, e)
+                    raise
 
     # -- send reply ----------------------------------------------------------
 
@@ -496,10 +525,13 @@ class FeishuClient:
             )
             .build()
         )
-        resp = self._client.im.v1.message.create(request)
-        if resp.success():
-            return True
-        logger.warning("Card send failed ({}): {}", resp.code, resp.msg)
+        try:
+            resp = self._http_retry(lambda: self._client.im.v1.message.create(request))
+            if resp.success():
+                return True
+            logger.warning("Card send failed ({}): {}", resp.code, resp.msg)
+        except RequestException:
+            logger.exception("Failed to send card to {}", chat_id)
         return False
 
     def _send_post_reply(self, chat_id: str, content: str) -> bool:
@@ -520,10 +552,13 @@ class FeishuClient:
             )
             .build()
         )
-        resp = self._client.im.v1.message.create(request)
-        if resp.success():
-            return True
-        logger.warning("Post send failed ({}): {}", resp.code, resp.msg)
+        try:
+            resp = self._http_retry(lambda: self._client.im.v1.message.create(request))
+            if resp.success():
+                return True
+            logger.warning("Post send failed ({}): {}", resp.code, resp.msg)
+        except RequestException:
+            logger.exception("Failed to send post to {}", chat_id)
         return False
 
     def send_plain_text(self, chat_id: str, content: str) -> None:
@@ -542,7 +577,12 @@ class FeishuClient:
             .build()
         )
         logger.debug("Sending plain text to {}: {}", chat_id, content)
-        self._client.im.v1.message.create(request)
+        try:
+            resp = self._http_retry(lambda: self._client.im.v1.message.create(request))
+            if resp.code != 0:
+                logger.warning("Send plain text failed ({}): {}", resp.code, resp.msg)
+        except RequestException:
+            logger.exception("Failed to send plain text to {}", chat_id)
 
     # -- reactions -----------------------------------------------------------
 
@@ -562,10 +602,16 @@ class FeishuClient:
             )
             .build()
         )
-        self._client.im.v1.message_reaction.create(request)
+        try:
+            self._http_retry(lambda: self._client.im.v1.message_reaction.create(request))
+        except RequestException:
+            logger.exception("Failed to add reaction to {}", message_id)
 
     def _remove_reaction(self, message_id: str) -> None:
         from lark_oapi.api.im.v1 import DeleteMessageReactionRequest
 
         request = DeleteMessageReactionRequest.builder().message_id(message_id).build()
-        self._client.im.v1.message_reaction.delete(request)
+        try:
+            self._client.im.v1.message_reaction.delete(request)
+        except RequestException:
+            logger.exception("Failed to remove reaction from {}", message_id)
