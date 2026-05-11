@@ -344,11 +344,13 @@ class ClaudeBridge:
                 self._bot_name, self._proc.pid if self._proc else "?", rc
             )
 
-            # Give the stderr drain thread a moment to finish reading
-            # before we snapshot the buffer.  Without this, _tail_stderr()
-            # often returns "(no stderr)" because the stderr thread hasn't
-            # flushed its last reads yet.
-            time.sleep(0.05)
+            # Wait for the stderr drain thread to finish reading before
+            # we snapshot the buffer.  After the process exits, both pipes
+            # are closed, so the stderr thread's readline() loop should
+            # receive EOF and exit promptly.  Join with a generous timeout
+            # to handle any Windows pipe-delay edge cases.
+            if self._stderr_thread is not None and self._stderr_thread.is_alive():
+                self._stderr_thread.join(timeout=2)
 
             # Suppress duplicate crash handling when a handler is already
             # running.  The drain thread from an already-dead process may

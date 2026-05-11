@@ -368,11 +368,11 @@ class TestFormatPermissionValue:
 class TestOnCardActionWrapper:
     """_on_card_action_wrapper — card button click handling."""
 
-    def _data(self, *, qr="confirm", cid="chat_1", open_id="open_1", action_name="btn_1"):
+    def _data(self, *, qr="confirm", cid="chat_1", open_id="open_1", action_name="btn_1", label="confirm"):
         class _M:
             pass
         act = _M()
-        act.value = {"qr": qr, "cid": cid}
+        act.value = {"qr": qr, "cid": cid, "label": label}
         act.name = action_name
         op = _M()
         op.open_id = open_id
@@ -423,6 +423,23 @@ class TestOnCardActionWrapper:
         client._on_card_action_wrapper(self._data())
         assert captured == []
 
+    def test_permanent_dedup(self) -> None:
+        """Same button clicked twice — second click shows 'already chosen' message."""
+        sent: list = []
+        captured: list = []
+        client = FeishuClient(app_id="t", app_secret="t",
+                              on_card_action=lambda r, c, s: captured.append((r, c, s)))
+        client._check_duplicate = lambda _: False  # type: ignore
+        client.send_plain_text = lambda c, t: sent.append((c, t))  # type: ignore
+        # First click: should go through
+        client._on_card_action_wrapper(self._data())
+        assert captured == [("confirm", "chat_1", "open_1")], "first click should invoke callback"
+        # Second click: should be blocked by permanent dedup
+        client._on_card_action_wrapper(self._data())
+        assert captured == [("confirm", "chat_1", "open_1")], "second click should not invoke callback"
+        assert len(sent) == 1
+        assert "confirm" in sent[0][1]
+
     def test_callback_exception_caught(self) -> None:
         client = FeishuClient(app_id="t", app_secret="t",
                               on_card_action=lambda *a: (_ for _ in ()).throw(RuntimeError("x")))
@@ -458,8 +475,8 @@ class TestSendPermissionCard:
         client.send_permission_card("chat_1", "Allow?", "req_1")
         els = sent[0]["body"]["elements"]
         assert len(els) == 4
-        assert els[1]["text"]["content"] == "🟢 允许一次"
-        assert els[2]["text"]["content"] == "允许本次"
+        assert els[1]["text"]["content"] == "允许本次"
+        assert els[2]["text"]["content"] == "始终允许"
         assert els[3]["text"]["content"] == "拒绝"
 
     def test_with_tool_value(self) -> None:
@@ -471,8 +488,10 @@ class TestSendPermissionCard:
             "tool_args": {"cmd": "ls"},
             "permission_prompt": "Run shell?",
         })
-        c = sent[0]["body"]["elements"][0]["content"]
-        assert "Bash" in c and "Run shell?" in c
+        c = sent[0]
+        assert c["header"]["title"]["content"] == "Bash"
+        assert "Run shell?" in c["body"]["elements"][0]["content"]
+        assert "cmd" in c["body"]["elements"][0]["content"]
 
     def test_empty_value_uses_prompt(self) -> None:
         client = FeishuClient(app_id="t", app_secret="t")

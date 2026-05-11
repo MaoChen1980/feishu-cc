@@ -47,6 +47,7 @@ class FeishuClient:
 
         self._client: Any = None
         self._dedup: dict[str, float] = {}
+        self._clicked_buttons: dict[str, str] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # -- lifecycle -----------------------------------------------------------
@@ -179,6 +180,7 @@ class FeishuClient:
         value: dict = action.value if isinstance(action.value, dict) else {}
         reply_text = value.get("qr", "")
         chat_id = value.get("cid", "")
+        label = value.get("label", reply_text)
         if not reply_text or not chat_id:
             logger.warning("Card action missing qr/cid: {}", value)
             return
@@ -187,6 +189,15 @@ class FeishuClient:
         if not sender_id:
             logger.warning("Card action missing open_id in operator")
             return
+
+        # Permanent dedup: once a button is clicked, subsequent clicks are no-op
+        button_key = f"{chat_id}:{reply_text}"
+        prev_label = self._clicked_buttons.get(button_key)
+        if prev_label is not None:
+            logger.info("Card button already clicked: {} -> {}", button_key, prev_label)
+            self.send_plain_text(chat_id, f"您已经选择了「{prev_label}」")
+            return
+        self._clicked_buttons[button_key] = label
 
         unique_id = f"card_{action.name or ''}_{int(time.time())}"
         if self._check_duplicate(unique_id):
@@ -465,7 +476,9 @@ class FeishuClient:
         """Send a permission request card with allow_once/allow_this_time/deny buttons."""
         logger.debug("[{}] Permission value: {}", chat_id, value)
 
-        content = ""
+        display_text = ""
+        tool_name = ""
+        tool_args: dict = {}
         if value:
             display_text = (
                 value.get("permission_prompt")
@@ -473,48 +486,31 @@ class FeishuClient:
                 or ""
             )
             tool_name = value.get("tool_name", "")
-            tool_args = value.get("tool_args", {})
-            if display_text:
-                if tool_name:
-                    content = f"**{tool_name} 请求权限**\n\n{display_text}"
-                else:
-                    content = f"**请求权限**\n\n{display_text}"
-            elif tool_name and tool_args:
-                args_str = "\n".join(
-                    f"  **{k}**: `{v}`"
-                    for k, v in tool_args.items()
-                    if not isinstance(v, (dict, list))
-                )
-                content = f"**{tool_name} 请求权限**\n{args_str}"
-            else:
-                details = FeishuClient._format_permission_value(value)
-                content = f"**{prompt}**\n{details}" if details else ""
-        if not content:
-            content = prompt
+            tool_args = value.get("tool_args", {}) or {}
 
-        elements = [
-            {"tag": "markdown", "content": content},
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "🟢 允许一次"},
-                "type": "primary",
-                "value": {"qr": f"__perm_allow_once__:{request_id}", "cid": chat_id},
-            },
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "允许本次"},
-                "type": "primary",
-                "value": {"qr": f"__perm_allow__:{request_id}", "cid": chat_id},
-            },
-            {
-                "tag": "button",
-                "text": {"tag": "plain_text", "content": "拒绝"},
-                "type": "danger",
-                "value": {"qr": f"__perm_deny__:{request_id}", "cid": chat_id},
-            },
+        desc = ""
+        if display_text:
+            desc = display_text
+        if tool_args:
+            arg_lines: list[str] = []
+            for k, v in tool_args.items():
+                if isinstance(v, (dict, list)):
+                    v = str(v)
+                arg_lines.append(f"**{k}**: `{v}`")
+            args_block = "\n".join(arg_lines)
+            desc = f"{desc}\n\n{args_block}" if desc else args_block
+        if not desc:
+            details = FeishuClient._format_permission_value(value or {})
+            desc = details or prompt
+
+        content = f"# {tool_name}\n\n{desc}" if tool_name else f"# 权限请求\n\n{desc}"
+
+        quick_replies = [
+            {"label": "允许本次", "reply": f"__perm_allow_once__:{request_id}"},
+            {"label": "始终允许", "reply": f"__perm_allow__:{request_id}"},
+            {"label": "拒绝", "reply": f"__perm_deny__:{request_id}"},
         ]
-        card = {"schema": "2.0", "config": {"width_mode": "fill"}, "body": {"elements": elements}}
-        self._send_card(card, chat_id)
+        self._send_card_reply(chat_id, content, quick_replies=quick_replies)
 
     # -- send implementations ------------------------------------------------
 
@@ -532,7 +528,7 @@ class FeishuClient:
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": qr["label"]},
                     "type": "default",
-                    "value": {"qr": qr["reply"], "cid": chat_id},
+                    "value": {"qr": qr["reply"], "cid": chat_id, "label": qr["label"]},
                 })
         card: dict[str, Any] = {
             "schema": "2.0",
