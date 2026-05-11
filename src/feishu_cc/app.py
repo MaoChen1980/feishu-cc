@@ -434,11 +434,9 @@ class FeishuCCApp:
             logger.error("[{}] Runtime not found", bot_name)
             return
 
-        # if text.strip() == "/restart":
-        #     logger.warning("[{}] /restart command from sender={} chat={} mid={}", bot_name, sender_id, chat_id, message_id)
-        #     feishu.send_reply(chat_id, message_id, "🔄 feishu-cc 重启中...")
-        #     self._restart_app()
-        #     return
+        if text.strip() == "/restart":
+            logger.info("[{}] /restart ignored (disabled)", bot_name)
+            return
 
         if text.startswith("/workspace "):
             new_workspace = text[len("/workspace "):].strip()
