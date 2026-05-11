@@ -340,6 +340,12 @@ class FeishuCCApp:
             lines.append(f"⚠️ 配置工作目录不存在：{bridge._startup_ws_warning}，已使用启动目录")
         else:
             lines.append(f"🔧 Workspace: {bridge._workspace}")
+        lines.append("")
+        lines.append("━━━ 命令帮助 ━━━")
+        lines.append("/help          — 列出可用命令")
+        lines.append("/tool          — 开启/关闭工具调用消息推送")
+        lines.append("/think         — 开启/关闭思考过程推送")
+        lines.append("/workspace路径 — 切换工作目录")
 
         rt.feishu.send_text(chat_id, "\n".join(lines))
         logger.info("[{}] Startup notification sent to {}", rt.name, chat_id)
@@ -428,6 +434,12 @@ class FeishuCCApp:
                 bridge._startup_ws_warning = None
             else:
                 lines.append(f"🔧 Workspace: {bridge._workspace}")
+            lines.append("")
+            lines.append("━━━ 命令帮助 ━━━")
+            lines.append("/help          — 列出可用命令")
+            lines.append("/tool          — 开启/关闭工具调用消息推送")
+            lines.append("/think         — 开启/关闭思考过程推送")
+            lines.append("/workspace路径 — 切换工作目录")
             feishu.send_text(chat_id, "\n".join(lines))
             bridge._pending_startup_info = False
 
@@ -438,6 +450,22 @@ class FeishuCCApp:
 
         if text.strip() == "/restart":
             logger.info("[{}] /restart ignored (disabled)", bot_name)
+            return
+
+        if text.strip() == "/help":
+            help_text = (
+                "📋 **可用命令**\n\n"
+                "`/help` — 显示此帮助\n"
+                "`/tool` — 开启/关闭工具调用消息推送\n"
+                "`/think` — 开启/关闭思考过程推送\n"
+                "`/workspace <path>` — 切换 Claude 工作目录\n\n"
+                "**功能特性**\n"
+                "• 快速按钮 — 回复中的 `---quick-replies` 可生成一键按钮\n"
+                "• 文件消息 — 支持下载并转发文件给 Claude\n"
+                "• 富文本卡片 — 自动选择最佳消息格式展示\n"
+                "• 会话持久化 — 重启后自动恢复会话\n"
+            )
+            feishu.send_reply(chat_id, message_id, help_text)
             return
 
         if text.strip() == "/tool":
