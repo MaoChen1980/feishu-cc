@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -76,6 +77,7 @@ class FeishuCCApp:
     def __init__(self, config_path: Optional[Union[str, Path]] = None):
         self._config = Config.load(config_path)
         self._bots: list[_BotRuntime] = []
+        self._restart_args = sys.argv
 
     def run(self) -> None:
         """Start all bots and block forever."""
@@ -251,6 +253,11 @@ class FeishuCCApp:
             logger.error("[{}] Runtime not found", bot_name)
             return
 
+        if text.strip() == "/restart":
+            feishu.send_reply(chat_id, message_id, "🔄 feishu-cc 重启中...")
+            self._restart_app()
+            return
+
         if text.startswith("/workspace "):
             new_workspace = text[len("/workspace "):].strip()
             if new_workspace:
@@ -310,6 +317,20 @@ class FeishuCCApp:
 
         # Normal card reply → forward to Claude as user message
         self._on_message(bot_name, bridge, feishu, chat_id, reply_text, "")
+
+    def _restart_app(self) -> None:
+        """Restart the entire feishu-cc process via os.execv."""
+        logger.info("Restarting feishu-cc...")
+        for rt in reversed(self._bots):
+            try:
+                rt.stop_loop()
+            except Exception:
+                logger.exception("[{}] Error stopping bot during restart", rt.name)
+        try:
+            os.execv(sys.executable, [sys.executable, "-m", "feishu_cc"] + self._restart_args[1:])
+        except OSError:
+            logger.exception("Failed to exec, falling back to exit")
+            os._exit(1)
 
     def _on_permission(self, feishu: FeishuClient, bot_name: str,
                        prompt: str, value: dict, request_id: str, chat_id: Optional[str]) -> None:
