@@ -440,6 +440,7 @@ class FeishuCCApp:
             lines.append("/tool          — 开启/关闭工具调用消息推送")
             lines.append("/think         — 开启/关闭思考过程推送")
             lines.append("/workspace路径 — 切换工作目录")
+            lines.append("/shutdown     — 关闭 feishu-cc")
             feishu.send_text(chat_id, "\n".join(lines))
             bridge._pending_startup_info = False
 
@@ -459,6 +460,7 @@ class FeishuCCApp:
                 "`/tool` — 开启/关闭工具调用消息推送\n"
                 "`/think` — 开启/关闭思考过程推送\n"
                 "`/workspace <path>` — 切换 Claude 工作目录\n"
+                "`/shutdown` — 关闭 feishu-cc\n"
             )
             feishu.send_reply(chat_id, message_id, help_text)
             return
@@ -473,6 +475,12 @@ class FeishuCCApp:
             bridge._show_thinking = not bridge._show_thinking
             state = "开启" if bridge._show_thinking else "关闭"
             feishu.send_reply(chat_id, message_id, f"💭 思考内容已{state}")
+            return
+
+        if text.strip() == "/shutdown":
+            feishu.send_reply(chat_id, message_id, "👋 正在关闭 feishu-cc...")
+            # Schedule shutdown in a thread to let the reply send first
+            threading.Thread(target=self._shutdown_app, daemon=True).start()
             return
 
         if text.startswith("/workspace "):
@@ -571,6 +579,19 @@ class FeishuCCApp:
             "subprocess.run(_args)\n"
         )
         subprocess.Popen([sys.executable, "-c", helper])
+        os._exit(0)
+
+    def _shutdown_app(self) -> None:
+        """Shutdown feishu-cc gracefully."""
+        logger.info("Shutting down feishu-cc...")
+        for rt in reversed(self._bots):
+            try:
+                rt.stop_loop()
+            except Exception:
+                logger.exception("[{}] Error stopping bot during shutdown", rt.name)
+
+        (CONFIG_DIR / "feishu-cc.pid").unlink(missing_ok=True)
+        logger.info("Goodbye.")
         os._exit(0)
 
     def _on_permission(self, feishu: FeishuClient, bot_name: str,
