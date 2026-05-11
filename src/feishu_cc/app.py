@@ -233,7 +233,7 @@ class FeishuCCApp:
             )
 
             bridge._pending_startup_info = True
-            bridge._show_tool_calls = True
+            bridge._show_tool_calls = False
             bridge._show_thinking = False
 
             feishu = FeishuClient(

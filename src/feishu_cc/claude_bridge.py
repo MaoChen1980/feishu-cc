@@ -292,9 +292,18 @@ class ClaudeBridge:
             except Exception:
                 logger.exception("[{}] stdout read error", self._bot_name)
 
-            # Pipe closed → process exited
+            # Pipe closed → process exited.
+            # On Windows, poll() can return None right after pipe close
+            # because the process handle hasn't been signaled yet.  Wait
+            # first to ensure returncode is properly populated.
             self._alive = False
-            rc = self._proc.poll() if self._proc else None
+            proc = self._proc
+            if proc:
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+            rc = proc.poll() if proc else None
             logger.warning(
                 "[{}] Claude stdout pipe closed (pid={}, returncode={})",
                 self._bot_name, self._proc.pid if self._proc else "?", rc
@@ -525,41 +534,38 @@ class ClaudeBridge:
 
             msg = {"type": "user", "message": {"role": "user", "content": text}}
             await self._write_json(msg)
-
-            # Guard against stale result events (from a previous message
-            # delivered late) by comparing the generation counter.
-            # Idle timeout: only timeout when Claude has been completely
-            # silent for `timeout` seconds — any event (text, tool_use,
-            # thinking, tool_result) resets the timer.
             self._last_activity = time.monotonic()
-            _CHECK_INTERVAL = 30.0
-            while True:
-                while not self._response_done.is_set():
-                    idle = time.monotonic() - self._last_activity
-                    remaining = timeout - idle
-                    if remaining <= 0:
-                        raise asyncio.TimeoutError(
-                            f"Claude idle for {idle:.0f}s (timeout={timeout:.0f}s)"
-                        )
-                    try:
-                        await asyncio.wait_for(
-                            self._response_done.wait(),
-                            timeout=min(remaining, _CHECK_INTERVAL),
-                        )
-                    except asyncio.TimeoutError:
-                        continue  # re-check idle time
 
-                if self._response_gen > gen:
-                    break
-                # Stale event — ignore and re-wait
-                logger.debug("[{}] Ignoring stale result event (gen={})", self._bot_name, self._response_gen)
-                self._response_done.clear()
+        # Release send_lock before waiting, so respond_permission etc. can
+        # write to stdin concurrently (permission responses, control messages).
+        _CHECK_INTERVAL = 30.0
+        while True:
+            while not self._response_done.is_set():
+                idle = time.monotonic() - self._last_activity
+                remaining = timeout - idle
+                if remaining <= 0:
+                    raise asyncio.TimeoutError(
+                        f"Claude idle for {idle:.0f}s (timeout={timeout:.0f}s)"
+                    )
+                try:
+                    await asyncio.wait_for(
+                        self._response_done.wait(),
+                        timeout=min(remaining, _CHECK_INTERVAL),
+                    )
+                except asyncio.TimeoutError:
+                    continue  # re-check idle time
 
-            if self._response_error:
-                err = self._response_error
-                self._response_error = None
-                raise err
-            return self._response_text
+            if self._response_gen > gen:
+                break
+            # Stale event — ignore and re-wait
+            logger.debug("[{}] Ignoring stale result event (gen={})", self._bot_name, self._response_gen)
+            self._response_done.clear()
+
+        if self._response_error:
+            err = self._response_error
+            self._response_error = None
+            raise err
+        return self._response_text
 
     async def restart(self, workspace: str) -> None:
         logger.info("[{}] Switching workspace to {}", self._bot_name, workspace)
