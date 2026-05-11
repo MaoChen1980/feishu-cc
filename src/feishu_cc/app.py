@@ -198,6 +198,7 @@ class FeishuCCApp:
                 feishu.send_plain_text(chat_id, "✅ 空闲")
             except asyncio.TimeoutError:
                 logger.warning("[{}] Timeout processing message from {} ({}s)", bot_name, chat_id, _RESPONSE_TIMEOUT)
+                bridge._init_failed = True
                 feishu.send_plain_text(chat_id, "⏰ 处理超时，请重试")
             except ConnectionError:
                 logger.warning("[{}] Connection lost to Claude for {}", bot_name, chat_id)
