@@ -456,16 +456,27 @@ class ClaudeBridge:
                     #   → 飞书显示: "> Bash pytest tests/"
                     name = block.get("name", "")
                     inp = block.get("input", {})
-                    # brief_input 优先级: command > path > file_path > description
-                    # 覆盖 Agent/Bash/Read/Edit/Write/Glob/Grep 等常见工具
                     if isinstance(inp, dict):
-                        brief_inp = (
-                            inp.get("command")
-                            or inp.get("path")
-                            or inp.get("file_path")
-                            or inp.get("description")
-                            or ""
-                        )
+                        # 优先按工具类型提取关键信息
+                        if name == "TodoWrite" and "todos" in inp:
+                            todos = inp["todos"]
+                            if isinstance(todos, list) and todos:
+                                first = todos[0].get("content", "") if isinstance(todos[0], dict) else str(todos[0])
+                                count = len(todos)
+                                brief_inp = f"{first}{f' … +{count - 1} 项' if count > 1 else ''}"
+                            else:
+                                brief_inp = ""
+                        else:
+                            brief_inp = (
+                                inp.get("command")
+                                or inp.get("pattern")
+                                or inp.get("query")
+                                or inp.get("path")
+                                or inp.get("file_path")
+                                or inp.get("description")
+                                or inp.get("expression")
+                                or ""
+                            )
                     else:
                         brief_inp = ""
                     logger.debug("[{}] Tool use: {}{}", self._bot_name, name, f" {brief_inp}" if brief_inp else "")
