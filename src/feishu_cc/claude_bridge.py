@@ -183,6 +183,11 @@ class ClaudeBridge:
         # prematurely unblocking a subsequent send_message.
         self._response_gen = 0
 
+        # Set by _handle_crash to signal send_message that Claude crashed
+        # mid-response, so it can raise ConnectionError instead of returning
+        # silently with empty _response_text.
+        self._response_error: Exception | None = None
+
         # Startup workspace warning: set when configured workspace is missing
         self._startup_ws_warning: str | None = None
 
@@ -302,6 +307,13 @@ class ClaudeBridge:
             # independent crashes.
             if self._crash_handling:
                 logger.debug("[{}] Skipping redundant crash ERROR (handler in progress)", self._bot_name)
+                # Still unblock parent crash handler if new process died
+                # before session established, so it can retry promptly
+                # instead of waiting for _INIT_TIMEOUT (45s).
+                if not self._ready.is_set():
+                    asyncio.run_coroutine_threadsafe(
+                        self._handle_init_failure(), self._loop
+                    )
                 return
 
             stderr = self._tail_stderr()
@@ -351,6 +363,12 @@ class ClaudeBridge:
             return
         self._crash_handling = True
         try:
+            # Signal send_message that Claude crashed mid-response.  Without
+            # this, send_message's while-loop sees _response_done set but
+            # _response_gen unchanged, logs "stale result event", clears
+            # and re-waits — until _RESPONSE_TIMEOUT (5 min).
+            self._response_error = ConnectionError("Claude process crashed during response")
+            self._response_gen += 1
             self._response_done.set()
 
             # Time-window crash counting: only crashes within the last 60s
@@ -380,24 +398,38 @@ class ClaudeBridge:
             self._session_id = None
 
             await asyncio.sleep(backoff)
-            try:
-                await self.start()
-                await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
-            except Exception:
-                logger.exception("[{}] Claude restart attempt {} failed, stderr:\n{}",
-                                 self._bot_name, n, self._tail_stderr())
-                raise
 
-            if self._init_failed:
-                # _ready was set by _handle_init_failure, not by a successful
-                # session establishment — the new process crashed before
-                # sending a session event.  Don't log "auto-restarted".
-                logger.warning("[{}] Claude restart attempt {} init failed (process died), stderr:\n{}",
-                               self._bot_name, n, self._tail_stderr())
+            # Retry restart up to 3 times within this crash-handler call.
+            # Transient failures (stale session, rapid crash after spawn)
+            # are recovered immediately instead of forcing send_message
+            # recovery path (which adds 45s+ delay).
+            for retry in range(3):
                 self._init_failed = False
+                self._ready.clear()
+                await self.start()
+
+                try:
+                    await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
+                except (asyncio.TimeoutError, ConnectionError):
+                    await self.stop()
+                    logger.warning("[{}] Restart attempt {}.{} failed (timeout), retrying in {}s",
+                                   self._bot_name, n, retry + 1, backoff)
+                    await asyncio.sleep(backoff)
+                    continue
+
+                if self._init_failed:
+                    logger.warning("[{}] Restart attempt {}.{} init failed (process died), retrying in {}s",
+                                   self._bot_name, n, retry + 1, backoff)
+                    self._init_failed = False
+                    await self.stop()
+                    await asyncio.sleep(backoff)
+                    continue
+
+                logger.info("[{}] Claude process auto-restarted", self._bot_name)
                 return
 
-            logger.info("[{}] Claude process auto-restarted", self._bot_name)
+            logger.error("[{}] Claude restart attempt {} failed after 3 retries",
+                         self._bot_name, n)
         finally:
             self._crash_handling = False
 
@@ -460,14 +492,20 @@ class ClaudeBridge:
                     logger.warning("[{}] Crash handler still busy after 5s, recovering anyway",
                                    self._bot_name)
 
-                logger.info("[{}] Recovering Claude process...", self._bot_name)
-                if self._session_file.exists():
-                    self._session_file.unlink()
-                self._session_id = None
-                self._init_failed = False
-                await self.start()
-                await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
+                # Crash handler may have already restarted Claude by now — re-check
+                # before starting a second process.
+                if self._alive and self._ready.is_set():
+                    logger.info("[{}] Crash handler already recovered Claude", self._bot_name)
+                else:
+                    logger.info("[{}] Recovering Claude process...", self._bot_name)
+                    if self._session_file.exists():
+                        self._session_file.unlink()
+                    self._session_id = None
+                    self._init_failed = False
+                    await self.start()
+                    await asyncio.wait_for(self._ready.wait(), timeout=_INIT_TIMEOUT)
 
+            self._response_error = None
             gen = self._response_gen = self._response_gen + 1
             self._response_text = ""
             self._response_done.clear()
@@ -485,6 +523,11 @@ class ClaudeBridge:
                 # Stale event — ignore and re-wait
                 logger.debug("[{}] Ignoring stale result event (gen={})", self._bot_name, self._response_gen)
                 self._response_done.clear()
+
+            if self._response_error:
+                err = self._response_error
+                self._response_error = None
+                raise err
             return self._response_text
 
     async def restart(self, workspace: str) -> None:
