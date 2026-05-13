@@ -48,6 +48,7 @@ class FeishuClient:
         self._client: Any = None
         self._dedup: dict[str, float] = {}
         self._clicked_buttons: dict[str, str] = {}
+        self._card_seq: int = 0
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # -- lifecycle -----------------------------------------------------------
@@ -181,6 +182,7 @@ class FeishuClient:
         reply_text = value.get("qr", "")
         chat_id = value.get("cid", "")
         label = value.get("label", reply_text)
+        card_id = value.get("card_id", "")
         if not reply_text or not chat_id:
             logger.warning("Card action missing qr/cid: {}", value)
             return
@@ -190,8 +192,8 @@ class FeishuClient:
             logger.warning("Card action missing open_id in operator")
             return
 
-        # Permanent dedup: once a button is clicked, subsequent clicks are no-op
-        button_key = f"{chat_id}:{reply_text}"
+        # Dedup per-card: same button on a different card is allowed
+        button_key = f"{chat_id}:{card_id}:{reply_text}"
         prev_label = self._clicked_buttons.get(button_key)
         if prev_label is not None:
             logger.info("Card button already clicked: {} -> {}", button_key, prev_label)
@@ -518,6 +520,8 @@ class FeishuClient:
         self, chat_id: str, content: str,
         quick_replies: list[dict[str, str]] | None = None,
     ) -> bool:
+        self._card_seq += 1
+        card_id = str(self._card_seq)
         header_text, body = self._extract_header(content)
         elements: list[dict[str, Any]] = [
             {"tag": "markdown", "content": body or content},
@@ -528,7 +532,7 @@ class FeishuClient:
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": qr["label"]},
                     "type": "default",
-                    "value": {"qr": qr["reply"], "cid": chat_id, "label": qr["label"]},
+                    "value": {"qr": qr["reply"], "cid": chat_id, "label": qr["label"], "card_id": card_id},
                 })
         card: dict[str, Any] = {
             "schema": "2.0",

@@ -224,6 +224,10 @@ class ClaudeBridge:
         # Startup workspace warning: set when configured workspace is missing
         self._startup_ws_warning: str | None = None
 
+        # Set by stop() to signal planned shutdown — checked by drain thread
+        # to distinguish intentional termination from unexpected crashes.
+        self._stop_event = threading.Event()
+
         # Reader threads
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -245,6 +249,7 @@ class ClaudeBridge:
         self._loop = asyncio.get_running_loop()
         self._ready.clear()
         self._response_done.clear()
+        self._stop_event.clear()
 
         # Validate workspace — fallback to cwd if configured dir doesn't exist
         self._startup_ws_warning = None
@@ -366,6 +371,12 @@ class ClaudeBridge:
                     )
                 return
 
+            # Planned shutdown (stop/restart) — no error to report.
+            if self._stop_event.is_set():
+                logger.info("[{}] Process {} shut down cleanly (returncode={})",
+                            self._bot_name, self._proc.pid if self._proc else "?", rc)
+                return
+
             stderr = self._tail_stderr()
             logger.error(
                 "[{}] Claude process {} (pid={}, returncode={}). Stderr:\n{}",
@@ -427,8 +438,8 @@ class ClaudeBridge:
 
             self._alive = False
             rc = self._proc.poll() if self._proc else None
-            logger.error("[{}] Claude process crashed (pid={}, returncode={})",
-                         self._bot_name, self._proc.pid if self._proc else "?", rc)
+            logger.warning("[{}] Crash handler — process (pid={}, returncode={})",
+                           self._bot_name, self._proc.pid if self._proc else "?", rc)
         finally:
             self._crash_handling = False
 
@@ -438,6 +449,16 @@ class ClaudeBridge:
         proc = self._proc
         if proc is None or proc.returncode is not None:
             return
+
+        # Signal drain thread that this is a planned shutdown, so it won't
+        # log a false crash ERROR when the stdout pipe closes.
+        self._stop_event.set()
+
+        # Unblock any in-flight send_message waiting on _response_done, so it
+        # raises ConnectionError instead of hanging until _IDLE_TIMEOUT.
+        self._response_error = ConnectionError("Claude process is being stopped")
+        self._response_gen += 1
+        self._response_done.set()
 
         pid = proc.pid
         logger.info("[{}] Stopping Claude subprocess (pid={})", self._bot_name, pid)
