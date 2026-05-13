@@ -64,6 +64,7 @@ class FeishuClient:
             .app_id(self._app_id)
             .app_secret(self._app_secret)
             .domain(self._domain)
+            .timeout(30.0)
             .log_level(lark.LogLevel.INFO)
             .build()
         )
