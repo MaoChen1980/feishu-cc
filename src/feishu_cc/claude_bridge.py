@@ -78,9 +78,9 @@ if os.name == "nt":
         ):
             _kernel32.CloseHandle(_WIN32_JOB_HANDLE)
             _WIN32_JOB_HANDLE = None
-            logger.debug("Failed to set KILL_ON_JOB_CLOSE on job object")
+            logger.warning("Failed to set KILL_ON_JOB_CLOSE on job object — Claude subprocesses may become orphans")
     else:
-        logger.debug("Failed to create job object, child processes may become orphaned")
+        logger.warning("Failed to create job object — Claude subprocesses may become orphans if parent crashes")
 
 DEFAULT_SYSTEM_PROMPT = """\
 你通过飞书与用户对话。回复可以使用 `---quick-replies` 提供一键按钮。
@@ -240,6 +240,10 @@ class ClaudeBridge:
         self._show_tool_calls = False
         self._show_thinking = False
         self._pending_startup_info = False
+
+        # Per-response tracking: buffer thinking to show only when no text emitted
+        self._thinking_buffer: list[str] = []
+        self._response_had_text = False
     # -- lifecycle -----------------------------------------------------------
 
     @property
@@ -683,12 +687,14 @@ class ClaudeBridge:
                 if block_type == "text":
                     text = block.get("text", "")
                     self._response_text += text
+                    if not self._response_had_text:
+                        self._response_had_text = True
+                        self._thinking_buffer.clear()
                     if self._on_text:
                         await self._callback_queue.put((self._on_text, text))
                 elif block_type == "thinking":
                     thinking = block.get("thinking", "")
-                    if self._on_thinking:
-                        await self._callback_queue.put((self._on_thinking, thinking))
+                    self._thinking_buffer.append(thinking)
                 elif block_type == "tool_use":
                     name = block.get("name", "")
                     inp = block.get("input", {})
@@ -740,6 +746,13 @@ class ClaudeBridge:
                 await self._callback_queue.put((self._on_error, err_type, err_msg))
 
         elif event_type == "result":
+            # Flush buffered thinking if no text was emitted in this response
+            if self._thinking_buffer and not self._response_had_text and self._on_thinking:
+                combined = "".join(self._thinking_buffer)
+                await self._callback_queue.put((self._on_thinking, combined))
+            self._thinking_buffer.clear()
+            self._response_had_text = False
+
             if self._on_result_content:
                 try:
                     result_data = event.get("result", {})
